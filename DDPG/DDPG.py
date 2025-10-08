@@ -147,7 +147,10 @@ class ReplayBuffer:
             return {k: torch.as_tensor(v, dtype=torch.float32, device=self.device) for k, v in batch.items()}
 
 
-class DDPG:
+class DDPGAgent:
+    ##################################################################################
+    # DDPG Agent
+    ##################################################################################
     def __init__(
         self,
         env_fn,
@@ -227,9 +230,6 @@ class DDPG:
         self.episode_returns = []
         self.episode_steps = []
         self._csv_path = os.path.join(self.log_dir, "training_returns.csv")
-        if not os.path.isfile(self._csv_path):
-            with open(self._csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(["global_step", "episode_return"])
 
         actor_params, critic_params = (count_vars(self.actor_critic.pi), count_vars(self.actor_critic.q))
         print(f"\nNumber of parameters: \t actor: {actor_params}, \t critic: {critic_params}\n")
@@ -301,6 +301,10 @@ class DDPG:
     def train(self, epochs: int = None):
         if epochs is None:
             epochs = self.epochs
+        ##################################################################################
+        if not os.path.isfile(self._csv_path):
+            with open(self._csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(["global_step", "episode_return"])
         total_steps = self.steps_per_epoch * epochs
         start_time = time.time()
         obs, _ = self.env.reset()
@@ -321,6 +325,7 @@ class DDPG:
             if done or (episode_length == self.max_ep_len):
                 # record before reset
                 self._record_episode(t, episode_return)
+                print(f"Step: {t+1}, Episode Return: {episode_return:.2f}, Episode Length: {episode_length}")
                 obs, _ = self.env.reset()
                 episode_return, episode_length = 0.0, 0
 
@@ -332,8 +337,7 @@ class DDPG:
             if (t + 1) % self.steps_per_epoch == 0:
                 epoch = (t + 1) // self.steps_per_epoch
                 print(f"Epoch {epoch} completed in {time.time() - start_time:.2f}s")
-                if epoch % self.plot_freq == 0:
-                    self._plot_returns(epoch)
+
 
             # save model
             if (t + 1) % (self.steps_per_epoch * self.save_freq) == 0:
