@@ -7,6 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 ANSI_COLORS = dict(
     gray=30, red=31, green=32, yellow=33, blue=34, magenta=35, cyan=36, white=37, crimson=38
@@ -165,7 +169,9 @@ class DDPG:
         num_test_episodes=10,
         max_ep_len=1000,
         save_freq=1,
-        device="auto",  # changed default: auto-select GPU if available
+        device="auto",
+        log_dir="logs",
+        plot_freq=1,
     ):
         """DDPG Agent initialization."""
         # Map underscored params to clean internal names (backward compatibility).
@@ -214,6 +220,16 @@ class DDPG:
         self.num_test_episodes = num_test_episodes
         self.max_ep_len = max_ep_len
         self.save_freq = save_freq
+        # logging additions
+        self.log_dir = log_dir
+        self.plot_freq = plot_freq
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.episode_returns = []
+        self.episode_steps = []
+        self._csv_path = os.path.join(self.log_dir, "training_returns.csv")
+        if not os.path.isfile(self._csv_path):
+            with open(self._csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(["global_step", "episode_return"])
 
         actor_params, critic_params = (count_vars(self.actor_critic.pi), count_vars(self.actor_critic.q))
         print(f"\nNumber of parameters: \t actor: {actor_params}, \t critic: {critic_params}\n")
@@ -259,7 +275,30 @@ class DDPG:
         action += noise_scale * np.random.randn(self.env.action_space.shape[0])
         return np.clip(action, -self.act_limit, self.act_limit)
 
-    def train(self, epochs: int = None): #TODO: add log of training progress
+    def _record_episode(self, global_step: int, ep_return: float):
+        self.episode_steps.append(global_step)
+        self.episode_returns.append(ep_return)
+        # append to csv
+        with open(self._csv_path, "a", newline="") as f:
+            csv.writer(f).writerow([global_step, ep_return])
+
+    def _plot_returns(self, epoch: int):
+        if not self.episode_returns:
+            return
+        plt.figure(figsize=(6,4))
+        plt.plot(self.episode_steps, self.episode_returns, label="Episode Return")
+        plt.xlabel("Env Steps")
+        plt.ylabel("Return")
+        plt.title("Return vs Steps")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        latest_path = os.path.join(self.log_dir, "return_vs_step_latest.png")
+        plt.savefig(latest_path, dpi=150, bbox_inches="tight")
+        per_epoch_path = os.path.join(self.log_dir, f"return_vs_step_epoch_{epoch}.png")
+        plt.savefig(per_epoch_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    def train(self, epochs: int = None):
         if epochs is None:
             epochs = self.epochs
         total_steps = self.steps_per_epoch * epochs
@@ -280,6 +319,8 @@ class DDPG:
             episode_length += 1
 
             if done or (episode_length == self.max_ep_len):
+                # record before reset
+                self._record_episode(t, episode_return)
                 obs, _ = self.env.reset()
                 episode_return, episode_length = 0.0, 0
 
@@ -291,6 +332,8 @@ class DDPG:
             if (t + 1) % self.steps_per_epoch == 0:
                 epoch = (t + 1) // self.steps_per_epoch
                 print(f"Epoch {epoch} completed in {time.time() - start_time:.2f}s")
+                if epoch % self.plot_freq == 0:
+                    self._plot_returns(epoch)
 
             # save model
             if (t + 1) % (self.steps_per_epoch * self.save_freq) == 0:
