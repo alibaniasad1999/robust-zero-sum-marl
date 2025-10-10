@@ -29,7 +29,7 @@ class MAMLPActorCritic(nn.Module):
         """Return action for given observation, for exploration."""
         with torch.no_grad():
             return self.pi(obs).cpu().numpy()
-    def act_d(self, obs, act) -> np.ndarray:
+    def act_d(self, obs) -> np.ndarray:
         """Return disturbance action for given observation and action, for exploration."""
         with torch.no_grad():
             return self.pi_d(obs).cpu().numpy()
@@ -156,7 +156,7 @@ class MADDPGAgent:
         for p in self.target_actor_critic.parameters():
             p.requires_grad = False
 
-        self.replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size, device=self.device)
+        self.replay_buffer = MAReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size, device=self.device)
         self.gamma = gamma
         self.polyak = polyak
         self.actor_optimizer = Adam(self.actor_critic.pi.parameters(), lr=pi_lr)
@@ -214,9 +214,10 @@ class MADDPGAgent:
         self.actor_optimizer.zero_grad()
         self.disturbance_optimizer.zero_grad()
         actor_loss = self._compute_actor_loss(batch)
-        disturbance_loss = -actor_loss
         actor_loss.backward()
-        disturbance_loss.backward()
+        for p in self.actor_critic.pi_d.parameters():
+            if p.grad is not None:
+                p.grad.mul_(-1)
         self.actor_optimizer.step()
         self.disturbance_optimizer.step()
         # Unfreeze critic
@@ -233,6 +234,13 @@ class MADDPGAgent:
         action = self.actor_critic.act(torch.as_tensor(obs, dtype=torch.float32, device=self.device))
         action += noise_scale * np.random.randn(self.env.action_space.shape[0])
         return np.clip(action, -self.act_limit, self.act_limit)
+    ##################################################################################
+    def get_disturbance_action(self, obs: np.ndarray, noise_scale: float) -> np.ndarray:
+        # ensure obs tensor is created on the active device
+        action = self.actor_critic.act_d(torch.as_tensor(obs, dtype=torch.float32, device=self.device))
+        action += noise_scale * np.random.randn(self.env.action_space.shape[0])
+        return np.clip(action, -self.act_limit * self.disturbance_ratio, self.act_limit * self.disturbance_ratio)
+    ##################################################################################
 
     def _record_episode(self, global_step: int, ep_return: float):
         self.episode_steps.append(global_step)
@@ -268,15 +276,24 @@ class MADDPGAgent:
         start_time = time.time()
         obs, _ = self.env.reset()
         episode_return, episode_length = 0.0, 0
+        disturbance = False
 
         for t in range(total_steps):
             if t > self.start_steps:
                 act = self.get_action(obs, self.act_noise)
+                if disturbance:
+                    act_d = self.get_disturbance_action(obs, self.act_noise)
+                else:
+                    act_d = np.zeros_like(act)
             else:
                 act = self.env.action_space.sample()
+                if disturbance:
+                    act_d = self.env.action_space.sample() * self.disturbance_ratio
+                else:
+                    act_d = np.zeros_like(act)
 
-            next_obs, reward, done, _, _ = self.env.step(act)
-            self.replay_buffer.store(obs, act, reward, next_obs, done)
+            next_obs, reward, done, _, _ = self.env.step(act+act_d)
+            self.replay_buffer.store(obs, act, act_d, reward, next_obs, done)
             obs = next_obs
             episode_return += reward
             episode_length += 1
@@ -284,9 +301,14 @@ class MADDPGAgent:
             if done or (episode_length == self.max_ep_len):
                 # record before reset
                 self._record_episode(t, episode_return)
-                print(f"Step: {t+1}, Episode Return: {episode_return:.2f}, Episode Length: {episode_length}")
+                # print(f"Step: {t+1}, Episode Return: {episode_return:.2f}, Episode Length: {episode_length}")
                 obs, _ = self.env.reset()
                 episode_return, episode_length = 0.0, 0
+                disturbance = np.random.rand() < self.second_agent_probability
+                if disturbance:
+                    print("Disturbance agent activated for next episode.")
+                else:
+                    print("No disturbance agent for next episode.")
 
             if t >= self.update_after and t % self.update_every == 0:
                 for _ in range(500):
@@ -306,16 +328,20 @@ class MADDPGAgent:
         os.makedirs(filepath, exist_ok=True)
         if self.device == torch.device("cuda"):
             torch.save(self.actor_critic.pi.state_dict(), os.path.join(filepath, "actor_cuda.pth"))
+            torch.save(self.actor_critic.pi_d.state_dict(), os.path.join(filepath, "disturbance_cuda.pth"))
             torch.save(self.actor_critic.q.state_dict(), os.path.join(filepath, "q_cuda.pth"))
         else:
             torch.save(self.actor_critic.pi.state_dict(), os.path.join(filepath, "actor_cpu.pth"))
+            torch.save(self.actor_critic.pi_d.state_dict(), os.path.join(filepath, "disturbance_cpu.pth"))
             torch.save(self.actor_critic.q.state_dict(), os.path.join(filepath, "q_cpu.pth"))
         print(colorize("Model saved.", "blue", bold=True))
 
     def load(self, filepath: str = "model/", load_device: torch.device = torch.device("cpu"), from_device_to_load: str = "cpu"):
         actor_file = f"actor_{from_device_to_load}.pth"
+        disturbance_file = f"disturbance_{from_device_to_load}.pth"
         critic_file = f"q_{from_device_to_load}.pth"
         actor_path = os.path.join(filepath, actor_file)
+        disturbance_path = os.path.join(filepath, disturbance_file)
         critic_path = os.path.join(filepath, critic_file)
 
         if not (os.path.isfile(actor_path) and os.path.isfile(critic_path)):
@@ -324,5 +350,6 @@ class MADDPGAgent:
 
         map_loc = load_device
         self.actor_critic.pi.load_state_dict(torch.load(actor_path, map_location=map_loc))
+        self.actor_critic.pi_d.load_state_dict(torch.load(disturbance_path, map_location=map_loc))
         self.actor_critic.q.load_state_dict(torch.load(critic_path, map_location=map_loc))
         print(colorize(f"Model loaded on {load_device}.", "blue", bold=True))
