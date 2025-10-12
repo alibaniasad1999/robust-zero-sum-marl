@@ -106,7 +106,7 @@ class ReplayBuffer:
             self.act_buf = np.zeros(combined_shape(size, act_dim), dtype=np.float32)
             self.rew_buf = np.zeros(size, dtype=np.float32)
             self.done_buf = np.zeros(size, dtype=np.float32)
-            self.ptr, self.size, self.max_size = 0, 0, size
+        self.ptr, self.size, self.max_size = 0, 0, size
         self.device = device
 
     def store(self, obs, act, rew, next_obs, done):
@@ -171,7 +171,7 @@ class DDPGAgent:
         act_noise=0.1,
         num_test_episodes=10,
         max_ep_len=1000,
-        save_freq=1,
+        save_freq=10,
         device="auto",
         log_dir="logs",
         plot_freq=1,
