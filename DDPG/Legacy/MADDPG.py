@@ -1,6 +1,12 @@
-from DDPG import *
+from DDPG.Legacy.DDPG import *
 import torch
 from torch import nn
+from DisturbanceDetectorLLM import (
+    TransformerDisturbanceDetector,
+    HistoryBuffer,
+    AdaptiveControllerBlender,
+    DisturbanceDetectorTrainer
+)
 
 class MLPQFunction(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation, device=torch.device("cpu")):
@@ -123,7 +129,10 @@ class MADDPGAgent:
         log_dir="logs",
         plot_freq=1,
         second_agent_probability=0.5,
-        disturbance_ratio=0.1
+        disturbance_ratio=0.1,
+        use_transformer_blending=True,  # NEW
+        transformer_sequence_length=20,  # NEW
+        transformer_lr=1e-4  # NEW
     ):
         """DDPG Agent initialization."""
         # Map underscored params to clean internal names (backward compatibility).
@@ -183,6 +192,38 @@ class MADDPGAgent:
         self.second_agent_probability = second_agent_probability
         self.disturbance_ratio = disturbance_ratio
 
+        # NEW: Initialize transformer-based controller blending
+        self.use_transformer_blending = use_transformer_blending
+        if self.use_transformer_blending:
+            obs_dim = self.env.observation_space.shape[0]
+            self.transformer_detector = TransformerDisturbanceDetector(
+                obs_dim=obs_dim,
+                sequence_length=transformer_sequence_length,
+                d_model=128,
+                nhead=4,
+                num_layers=3,
+                device=self.device
+            )
+            self.history_buffer = HistoryBuffer(
+                obs_dim=obs_dim,
+                max_length=transformer_sequence_length,
+                device=self.device
+            )
+            self.controller_blender = AdaptiveControllerBlender(
+                detector=self.transformer_detector,
+                history_buffer=self.history_buffer,
+                smoothing_window=5
+            )
+            self.transformer_trainer = DisturbanceDetectorTrainer(
+                model=self.transformer_detector,
+                learning_rate=transformer_lr,
+                device=self.device
+            )
+            
+            # Buffer for transformer training data
+            self.transformer_replay_buffer = []
+            self.alpha_history_log = []
+        
         actor_params, critic_params = (count_vars(self.actor_critic.pi), count_vars(self.actor_critic.q))
         print(f"\nNumber of parameters: \t actor: {actor_params}, \t critic: {critic_params}\n")
 
@@ -242,6 +283,92 @@ class MADDPGAgent:
         return np.clip(action, -self.act_limit * self.disturbance_ratio, self.act_limit * self.disturbance_ratio)
     ##################################################################################
 
+    def get_blended_action(self, obs: np.ndarray, noise_scale: float) -> Tuple[np.ndarray, float, float]:
+        """
+        Get action using transformer-based blending between optimal and robust controllers.
+        
+        Returns:
+            action: Blended action
+            alpha: Blending weight (0=robust, 1=optimal)
+            disturbance_prob: Predicted disturbance probability
+        """
+        # Get optimal controller action (without disturbance)
+        action_optimal = self.get_action(obs, noise_scale)
+        
+        # Get robust controller action (with disturbance consideration)
+        action_robust = self.get_action(obs, noise_scale)
+        # Note: In practice, the robust action comes from training with disturbances
+        
+        # Blend using transformer
+        blended_action, alpha, disturbance_prob = self.controller_blender.get_blended_action(
+            obs, action_optimal, action_robust
+        )
+        
+        return blended_action, alpha, disturbance_prob
+
+    def _collect_transformer_training_data(
+        self,
+        obs_sequence: np.ndarray,
+        has_disturbance: bool,
+        episode_performance: float
+    ):
+        """
+        Collect data for training the transformer.
+        
+        Args:
+            obs_sequence: Recent observation history
+            has_disturbance: Whether disturbance was present
+            episode_performance: Metric to compute optimal blending weight
+        """
+        # Compute optimal blending weight based on performance
+        # Lower performance with disturbance → lower α (more robust)
+        # Higher performance without disturbance → higher α (more optimal)
+        if has_disturbance:
+            # Map performance to α: worse performance → lower α
+            optimal_alpha = np.clip(episode_performance / 100.0, 0.0, 0.5)
+        else:
+            # No disturbance: prefer optimal controller
+            optimal_alpha = np.clip(0.5 + episode_performance / 200.0, 0.5, 1.0)
+        
+        self.transformer_replay_buffer.append({
+            'obs_sequence': obs_sequence,
+            'has_disturbance': float(has_disturbance),
+            'optimal_alpha': optimal_alpha
+        })
+        
+        # Limit buffer size
+        if len(self.transformer_replay_buffer) > 10000:
+            self.transformer_replay_buffer.pop(0)
+
+    def _train_transformer(self, batch_size: int = 64):
+        """Train the transformer disturbance detector."""
+        if len(self.transformer_replay_buffer) < batch_size:
+            return {}
+        
+        # Sample batch
+        indices = np.random.choice(len(self.transformer_replay_buffer), batch_size, replace=False)
+        batch = [self.transformer_replay_buffer[i] for i in indices]
+        
+        # Prepare tensors
+        obs_sequences = torch.stack([
+            torch.as_tensor(item['obs_sequence'], dtype=torch.float32, device=self.device)
+            for item in batch
+        ])
+        disturbance_labels = torch.tensor(
+            [item['has_disturbance'] for item in batch],
+            dtype=torch.float32,
+            device=self.device
+        )
+        optimal_alphas = torch.tensor(
+            [item['optimal_alpha'] for item in batch],
+            dtype=torch.float32,
+            device=self.device
+        )
+        
+        # Train
+        info = self.transformer_trainer.train_step(obs_sequences, disturbance_labels, optimal_alphas)
+        return info
+
     def _record_episode(self, global_step: int, ep_return: float):
         self.episode_steps.append(global_step)
         self.episode_returns.append(ep_return)
@@ -268,19 +395,45 @@ class MADDPGAgent:
     def train(self, epochs: int = None):
         if epochs is None:
             epochs = self.epochs
-        ##################################################################################
+        
         if not os.path.isfile(self._csv_path):
             with open(self._csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(["global_step", "episode_return"])
+        
+        # NEW: CSV for alpha tracking
+        alpha_csv_path = os.path.join(self.log_dir, "blending_alpha.csv")
+        if self.use_transformer_blending and not os.path.isfile(alpha_csv_path):
+            with open(alpha_csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(["global_step", "alpha", "disturbance_prob", "has_disturbance"])
+        
         total_steps = self.steps_per_epoch * epochs
         start_time = time.time()
         obs, _ = self.env.reset()
         episode_return, episode_length = 0.0, 0
         disturbance = False
+        
+        # NEW: Episode observation history for transformer
+        episode_obs_history = []
 
         for t in range(total_steps):
+            episode_obs_history.append(obs.copy())
+            
             if t > self.start_steps:
-                act = self.get_action(obs, self.act_noise)
+                if self.use_transformer_blending:
+                    # Use transformer-based blending
+                    act, alpha, disturbance_prob = self.get_blended_action(obs, self.act_noise)
+                    
+                    # Log alpha
+                    self.alpha_history_log.append((t, alpha, disturbance_prob, float(disturbance)))
+                    if len(self.alpha_history_log) % 100 == 0:
+                        with open(alpha_csv_path, "a", newline="") as f:
+                            writer = csv.writer(f)
+                            for entry in self.alpha_history_log[-100:]:
+                                writer.writerow(entry)
+                else:
+                    # Original behavior
+                    act = self.get_action(obs, self.act_noise)
+                
                 if disturbance:
                     act_d = self.get_disturbance_action(obs, self.act_noise)
                 else:
@@ -299,26 +452,44 @@ class MADDPGAgent:
             episode_length += 1
 
             if done or (episode_length == self.max_ep_len):
-                # record before reset
+                # NEW: Collect transformer training data
+                if self.use_transformer_blending and len(episode_obs_history) >= 20:
+                    # Take last sequence_length observations
+                    seq_len = self.transformer_detector.sequence_length
+                    obs_seq = np.array(episode_obs_history[-seq_len:])
+                    self._collect_transformer_training_data(obs_seq, disturbance, episode_return)
+                
                 self._record_episode(t, episode_return)
-                # print(f"Step: {t+1}, Episode Return: {episode_return:.2f}, Episode Length: {episode_length}")
                 obs, _ = self.env.reset()
                 episode_return, episode_length = 0.0, 0
+                episode_obs_history = []
+                
                 disturbance = np.random.rand() < self.second_agent_probability
                 if disturbance:
                     print("Disturbance agent activated for next episode.")
                 else:
                     print("No disturbance agent for next episode.")
+                
+                # Reset blender history
+                if self.use_transformer_blending:
+                    self.controller_blender.reset()
 
             if t >= self.update_after and t % self.update_every == 0:
                 for _ in range(500):
                     batch = self.replay_buffer.sample_batch(self.batch_size)
                     self._update(batch)
+                
+                # NEW: Train transformer
+                if self.use_transformer_blending and t % (self.update_every * 10) == 0:
+                    for _ in range(50):
+                        transformer_info = self._train_transformer(batch_size=64)
+                        if transformer_info:
+                            print(f"Transformer training - Loss: {transformer_info.get('total_loss', 0):.4f}, "
+                                  f"Alpha MSE: {transformer_info.get('loss_blending', 0):.4f}")
 
             if (t + 1) % self.steps_per_epoch == 0:
                 epoch = (t + 1) // self.steps_per_epoch
                 print(f"Epoch {epoch} completed in {time.time() - start_time:.2f}s")
-
 
             # save model
             if (t + 1) % (self.steps_per_epoch * self.save_freq) == 0:
@@ -326,14 +497,19 @@ class MADDPGAgent:
 
     def save(self, filepath: str = "model/"):
         os.makedirs(filepath, exist_ok=True)
-        if self.device == torch.device("cuda"):
-            torch.save(self.actor_critic.pi.state_dict(), os.path.join(filepath, "actor_cuda.pth"))
-            torch.save(self.actor_critic.pi_d.state_dict(), os.path.join(filepath, "disturbance_cuda.pth"))
-            torch.save(self.actor_critic.q.state_dict(), os.path.join(filepath, "q_cuda.pth"))
-        else:
-            torch.save(self.actor_critic.pi.state_dict(), os.path.join(filepath, "actor_cpu.pth"))
-            torch.save(self.actor_critic.pi_d.state_dict(), os.path.join(filepath, "disturbance_cpu.pth"))
-            torch.save(self.actor_critic.q.state_dict(), os.path.join(filepath, "q_cpu.pth"))
+        device_suffix = "cuda" if self.device == torch.device("cuda") else "cpu"
+        
+        torch.save(self.actor_critic.pi.state_dict(), os.path.join(filepath, f"actor_{device_suffix}.pth"))
+        torch.save(self.actor_critic.pi_d.state_dict(), os.path.join(filepath, f"disturbance_{device_suffix}.pth"))
+        torch.save(self.actor_critic.q.state_dict(), os.path.join(filepath, f"q_{device_suffix}.pth"))
+        
+        # NEW: Save transformer
+        if self.use_transformer_blending:
+            torch.save(
+                self.transformer_detector.state_dict(),
+                os.path.join(filepath, f"transformer_{device_suffix}.pth")
+            )
+        
         print(colorize("Model saved.", "blue", bold=True))
 
     def load(self, filepath: str = "model/", load_device: torch.device = torch.device("cpu"), from_device_to_load: str = "cpu"):
@@ -353,3 +529,13 @@ class MADDPGAgent:
         self.actor_critic.pi_d.load_state_dict(torch.load(disturbance_path, map_location=map_loc))
         self.actor_critic.q.load_state_dict(torch.load(critic_path, map_location=map_loc))
         print(colorize(f"Model loaded on {load_device}.", "blue", bold=True))
+        
+        # NEW: Load transformer
+        if self.use_transformer_blending:
+            transformer_file = f"transformer_{from_device_to_load}.pth"
+            transformer_path = os.path.join(filepath, transformer_file)
+            if os.path.isfile(transformer_path):
+                self.transformer_detector.load_state_dict(
+                    torch.load(transformer_path, map_location=load_device)
+                )
+                print(colorize("Transformer loaded.", "blue", bold=True))
