@@ -1,5 +1,4 @@
-gymnasium
-pandas
-numpy~=2.3.3
-torch~=2.8.0
-matplotlib~=3.10.6
+numpy~=2.4.2
+torch~=2.10.0
+matplotlib~=3.10.8
+gymnasium~=1.2.3
