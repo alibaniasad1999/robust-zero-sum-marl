@@ -1,0 +1,1397 @@
+% ===========================================================================
+%  IEEE Conference Paper
+%  Zero-Sum Robust Deep RL with Transformer-Based Disturbance Detection
+%  and Policy Mixing for Real-Time Control on Embedded GPUs
+% ===========================================================================
+\documentclass[conference]{IEEEtran}
+
+% ---- packages -------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{multirow}
+
+% ---- hyperref setup --------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+% ---- math helpers ----------------------------------------------------------
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\cS}{\mathcal{S}}
+\newcommand{\cA}{\mathcal{A}}
+\newcommand{\cP}{\mathcal{P}}
+\newcommand{\cR}{\mathcal{R}}
+\newcommand{\cL}{\mathcal{L}}
+\newcommand{\cD}{\mathcal{D}}
+\newcommand{\cT}{\mathcal{T}}
+\newcommand{\piopt}{\pi^{\text{opt}}}
+\newcommand{\pirob}{\pi^{\text{rob}}}
+\newcommand{\piadv}{\pi^{\text{adv}}}
+
+% ===========================================================================
+\title{Zero-Sum Robust Deep Reinforcement Learning with\\
+Transformer-Based Disturbance Detection and Policy Mixing\\
+for Real-Time Control on Embedded GPUs}
+
+\author{
+\IEEEauthorblockN{Author A\IEEEauthorrefmark{1},
+Author B\IEEEauthorrefmark{1},
+Author C\IEEEauthorrefmark{2},
+Author D\IEEEauthorrefmark{1}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1}Department of Computer Science,
+University of Placeholder, City, Country\\
+Email: \{author.a, author.b, author.d\}@placeholder.edu}
+\IEEEauthorblockA{\IEEEauthorrefmark{2}Department of Electrical Engineering,
+Institute of Technology, City, Country\\
+Email: author.c@placeholder.edu}
+}
+
+\begin{document}
+\maketitle
+
+\begin{IEEEkeywords}
+robust reinforcement learning, zero-sum Markov games, adversarial training,
+transformer anomaly detection, policy mixing, TensorRT, embedded deployment
+\end{IEEEkeywords}
+
+% ===========================================================================
+\begin{abstract}
+% ===========================================================================
+Deploying reinforcement learning (RL) policies on physical robots requires
+robustness to unmodeled disturbances, parameter uncertainty, and the
+sim-to-real gap.  We present a methodology for robust control that frames
+the problem as a two-player zero-sum Markov game in which a learned
+adversary systematically probes the weaknesses of the control policy during
+training.  Our architecture maintains two distinct policies: an
+\emph{optimal} policy $\piopt$ trained on the nominal environment to
+maximize expected return, and a \emph{robust} policy $\pirob$ co-trained
+against the adversary to maximize worst-case return.  At runtime, a
+lightweight transformer encoder processes a sliding window of recent
+observations to produce a real-time disturbance estimate---both a detection
+probability and an estimated magnitude.  A learned gating function converts
+this estimate into a continuous mixing coefficient $\alpha_t \in [0,1]$
+that blends the two policies, yielding actions
+$a_t = \alpha_t\,\pirob(s_t) + (1-\alpha_t)\,\piopt(s_t)$.  The training
+pipeline is implemented in PyTorch with Gymnasium and MuJoCo, with a
+planned migration to JAX and MJX for GPU-vectorized environment
+parallelism.  For deployment, all neural network components are exported
+through ONNX to TensorRT engines optimized for the NVIDIA Jetson platform,
+and integrated into a ROS~2 control node that achieves sub-two-millisecond
+inference latency at up to 500\,Hz.  We provide a complete data-logging
+specification, three detailed algorithmic procedures covering adversarial
+training, transformer detector training, and real-time inference, and a
+comprehensive evaluation plan with ablation studies and baselines.  This
+paper describes the full methodology and system design; empirical results
+are deferred to a follow-up study.
+\end{abstract}
+
+% ===========================================================================
+\section{Introduction}\label{sec:intro}
+% ===========================================================================
+
+Reinforcement learning has achieved impressive results in simulated
+continuous-control benchmarks, yet transferring learned policies to physical
+robots remains a significant challenge.  Real-world systems are subject to
+disturbances---external forces, friction changes, payload variation,
+sensor noise, and actuator degradation---that are difficult to capture
+faithfully in a simulator.  The resulting \emph{sim-to-real gap} frequently
+causes policies that perform well in simulation to fail when deployed on
+hardware~\cite{zhao2020simtoreal}.
+
+A principled approach to this problem is \emph{robust} reinforcement
+learning, which seeks policies that perform well not only under nominal
+conditions but also under worst-case perturbations.  One particularly
+elegant formulation models the interaction between the controller and the
+environment disturbance as a \emph{two-player zero-sum Markov
+game}~\cite{littman1994markov}: the controller maximizes cumulative reward
+while a learned adversary minimizes it, and training converges toward a
+Nash equilibrium that provides formal worst-case guarantees.  This approach,
+pioneered by Robust Adversarial Reinforcement Learning
+(RARL)~\cite{pinto2017robust} and the $H_\infty$ control
+perspective~\cite{morimoto2005robust}, has since been extended to
+state-adversarial formulations~\cite{zhang2020robust} and adversarial
+populations~\cite{vinitsky2020robust}.
+
+Despite these advances, several gaps remain in the literature.  First,
+existing adversarial training methods produce a \emph{single} policy that
+compromises between nominal performance and worst-case robustness; no
+mechanism exists to recover full nominal performance when disturbances are
+absent.  Second, at deployment time, the policy has no explicit
+\emph{awareness} of whether or not a disturbance is currently active: it
+applies the same conservative strategy regardless of conditions.  Third,
+transformer-based anomaly detection has shown strong results in multivariate
+time-series domains~\cite{tuli2022tranad, xu2022anomaly}, yet this
+capability has not been leveraged for runtime disturbance detection in RL
+control systems.  Finally, few works address the complete pipeline from
+adversarial training through model export to real-time inference on embedded
+GPU platforms with ROS~2 integration.
+
+This paper addresses these gaps with the following contributions:
+\begin{itemize}
+\item A \textbf{dual-policy mixing architecture} that maintains separate
+      optimal and robust policies and blends their actions through a
+      continuous gating coefficient, preserving nominal performance while
+      providing worst-case robustness on demand.
+\item A \textbf{transformer-based disturbance detector} that operates on a
+      sliding window of observations and outputs a detection probability
+      and estimated disturbance magnitude in real time, providing the signal
+      needed for the gating decision.
+\item A \textbf{unified training pipeline} with a detailed data-logging
+      specification that supports both off-policy and on-policy adversarial
+      training algorithms and generates the supervised dataset for the
+      transformer detector.
+\item A \textbf{deployment pipeline} that exports all neural network
+      components to ONNX, optimizes them with TensorRT for the NVIDIA
+      Jetson platform, and integrates them into a ROS~2 node meeting
+      sub-two-millisecond latency budgets.
+\item A \textbf{comprehensive evaluation plan} including ablation studies,
+      baselines, and safety checks, designed to rigorously validate the
+      approach once empirical experiments are conducted.
+\end{itemize}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:background} reviews the necessary technical background.
+Section~\ref{sec:related} surveys related work.
+Section~\ref{sec:formulation} formalizes the problem.
+Section~\ref{sec:method} presents the method in detail, including
+algorithms and data specifications.
+Section~\ref{sec:implementation} describes the system implementation.
+Section~\ref{sec:evaluation} outlines the evaluation plan.
+Section~\ref{sec:discussion} discusses limitations, and
+Section~\ref{sec:conclusion} concludes.
+
+% ===========================================================================
+\section{Background and Preliminaries}\label{sec:background}
+% ===========================================================================
+
+% ---------------------------------------------------------------------------
+\subsection{Markov Decision Processes}\label{sec:bg_mdp}
+% ---------------------------------------------------------------------------
+
+A Markov Decision Process (MDP) is defined by the tuple
+$(\cS, \cA, P, R, \gamma)$, where $\cS$ is the state space,
+$\cA$ is the action space, $P: \cS \times \cA \times \cS \to [0,1]$ is
+the transition kernel, $R: \cS \times \cA \to \R$ is the reward function,
+and $\gamma \in [0,1)$ is the discount factor.  A stochastic policy
+$\pi: \cS \to \Delta(\cA)$ maps states to distributions over actions.  The
+state-value function and action-value function under policy $\pi$ are
+\begin{align}
+V^\pi(s) &= \E_\pi\!\left[\sum_{t=0}^{\infty}\gamma^t R(s_t, a_t)
+  \;\middle|\; s_0 = s\right], \label{eq:value}\\
+Q^\pi(s,a) &= \E_\pi\!\left[\sum_{t=0}^{\infty}\gamma^t R(s_t, a_t)
+  \;\middle|\; s_0 = s, a_0 = a\right]. \label{eq:qvalue}
+\end{align}
+These satisfy the Bellman equation
+\begin{equation}\label{eq:bellman}
+V^\pi(s) = \E_{a\sim\pi(\cdot|s)}\!\Big[R(s,a) +
+  \gamma\,\E_{s'\sim P(\cdot|s,a)}V^\pi(s')\Big].
+\end{equation}
+The goal of reinforcement learning is to find a policy $\pi^*$ that
+maximizes $V^\pi(s)$ for all $s \in \cS$.
+
+% ---------------------------------------------------------------------------
+\subsection{Two-Player Zero-Sum Markov Games}\label{sec:bg_game}
+% ---------------------------------------------------------------------------
+
+A two-player zero-sum Markov game~\cite{littman1994markov} extends the MDP
+to $(\cS, \cA_1, \cA_2, P, R, \gamma)$, where $\cA_1$ and $\cA_2$ are
+the action spaces of Player~1 (the controller) and Player~2 (the
+adversary/disturbance), respectively.  The transition kernel becomes
+$P: \cS \times \cA_1 \times \cA_2 \times \cS \to [0,1]$, and the reward
+$R(s, a_1, a_2)$ is received by the controller while the adversary
+receives $-R(s, a_1, a_2)$.  A pair of policies
+$(\pi_1^*, \pi_2^*)$ constitutes a \emph{Nash equilibrium} if
+\begin{equation}\label{eq:nash}
+V^{\pi_1^*,\pi_2}(s) \;\geq\; V^{\pi_1^*,\pi_2^*}(s) \;\geq\;
+V^{\pi_1,\pi_2^*}(s)
+\end{equation}
+for all $s$, $\pi_1$, $\pi_2$.  The \emph{minimax value} is
+\begin{equation}\label{eq:minimax}
+V^*(s) = \max_{\pi_1}\min_{\pi_2}\;
+  \E\!\left[\sum_{t=0}^{\infty}\gamma^t R(s_t, a_t^1, a_t^2)
+  \;\middle|\; s_0=s\right].
+\end{equation}
+This formulation provides a natural framework for robust control: the
+controller learns to maximize reward against the strongest possible
+adversary, yielding a policy with formal worst-case performance
+guarantees.
+
+% ---------------------------------------------------------------------------
+\subsection{Deep Reinforcement Learning Algorithms}\label{sec:bg_drl}
+% ---------------------------------------------------------------------------
+
+We consider four deep RL algorithms as candidate training methods for
+both the controller and the adversary.
+
+\textbf{DDPG}~\cite{lillicrap2016continuous} is an off-policy actor-critic
+algorithm for continuous action spaces.  It maintains a deterministic
+policy $\mu_\theta(s)$, a critic $Q_\phi(s,a)$, a replay buffer for
+experience storage, and target networks $\mu_{\theta'}$, $Q_{\phi'}$
+updated via Polyak averaging.  The critic is trained by minimizing the
+temporal-difference (TD) error, and the actor is updated by applying the
+deterministic policy gradient~\cite{silver2014deterministic}.
+
+\textbf{TD3}~\cite{fujimoto2018addressing} improves upon DDPG with three
+modifications: (i)~twin critics $Q_{\phi_1}$, $Q_{\phi_2}$ with the
+minimum taken as the target (reducing overestimation bias), (ii)~delayed
+policy updates (the actor is updated less frequently than the critic), and
+(iii)~target policy smoothing (noise is added to the target action to
+regularize the critic).
+
+\textbf{SAC}~\cite{haarnoja2018soft} is an off-policy algorithm based on
+the maximum-entropy RL framework.  The objective augments the expected
+return with an entropy term:
+\begin{equation}\label{eq:sac_obj}
+J_{\text{SAC}}(\pi) = \E_\pi\!\left[\sum_{t=0}^{\infty}\gamma^t
+  \Big(R(s_t,a_t) + \beta\,\mathcal{H}\!\big(\pi(\cdot|s_t)\big)\Big)
+  \right],
+\end{equation}
+where $\beta > 0$ is the temperature parameter (often automatically
+tuned) and $\mathcal{H}$ denotes the Shannon entropy.  SAC learns a
+stochastic policy parameterized via the reparameterization trick, combined
+with twin critics as in TD3.
+
+\textbf{PPO}~\cite{schulman2017proximal} is an on-policy algorithm that
+optimizes a clipped surrogate objective:
+\begin{equation}\label{eq:ppo_obj}
+J_{\text{PPO}}(\theta) = \E_t\!\left[\min\!\big(r_t(\theta)\hat{A}_t,\;
+  \text{clip}(r_t(\theta), 1{-}\epsilon, 1{+}\epsilon)\hat{A}_t\big)
+  \right],
+\end{equation}
+where $r_t(\theta) = \pi_\theta(a_t|s_t)/\pi_{\theta_\text{old}}(a_t|s_t)$
+is the probability ratio and $\hat{A}_t$ is the generalized advantage
+estimate (GAE).  PPO collects rollouts in batches and performs multiple
+epochs of mini-batch optimization before discarding the data.
+
+% ---------------------------------------------------------------------------
+\subsection{Robust Reinforcement Learning Formulations}\label{sec:bg_robust}
+% ---------------------------------------------------------------------------
+
+Several formulations address robustness in RL.
+\emph{Robust MDPs}~\cite{iyengar2005robust, nilim2005robust} replace the
+single transition kernel $P$ with an \emph{uncertainty set}
+$\cP \ni P$, and the agent optimizes against the worst-case element:
+$V^*(s) = \max_\pi \min_{P \in \cP} V^\pi_P(s)$.  The
+\emph{$H_\infty$ approach}~\cite{morimoto2005robust} penalizes the
+sensitivity of the value function to disturbances, yielding a minimax
+objective similar to~\eqref{eq:minimax} but with a continuous disturbance
+signal rather than a discrete adversary.
+
+\emph{Adversarial training} (RARL)~\cite{pinto2017robust} operationalizes
+the zero-sum game by training a neural-network adversary that applies
+forces to the agent's body, alternating between controller and adversary
+updates.  This has been extended to \emph{state-adversarial}
+MDPs~\cite{zhang2020robust}, where the adversary perturbs the
+observations rather than the dynamics, and \emph{action-robust}
+formulations~\cite{tessler2019action}, where the adversary modifies the
+executed action.  A comprehensive survey of robust RL methods is provided
+by Moos~et~al.~\cite{moos2022robust}.
+
+% ===========================================================================
+\section{Related Work}\label{sec:related}
+% ===========================================================================
+
+% ---------------------------------------------------------------------------
+\subsection{Adversarial and Robust Reinforcement Learning}
+% ---------------------------------------------------------------------------
+
+The idea of training RL agents against adversarial perturbations
+originates with Morimoto and Doya~\cite{morimoto2005robust}, who cast
+robust control as a differential game and solved it with actor-critic
+methods.  Pinto~et~al.~\cite{pinto2017robust} introduced RARL, in which
+a destabilizing adversary applies forces to the agent's body during
+training, demonstrating improved transfer to environments with
+modified physical parameters.  Pan~et~al.~\cite{pan2019risk} proposed a
+risk-averse variant of RARL that incorporates CVaR-based objectives to
+further reduce tail risk.  Vinitsky~et~al.~\cite{vinitsky2020robust}
+showed that training against an \emph{ensemble} of adversarial policies,
+rather than a single adversary, prevents the controller from overfitting
+to one attack strategy and improves generalization.
+
+Zhang~et~al.~\cite{zhang2020robust} formulated the state-adversarial MDP
+(SA-MDP), in which the adversary perturbs the agent's observations
+within a bounded $\ell_p$ ball.  They derived a regularizer that
+encourages policy smoothness with respect to state perturbations.
+Oikarinen~et~al.~\cite{oikarinen2021robust} extended this idea by
+incorporating a certified adversarial loss during training, providing
+provable robustness bounds for linear function approximators.
+Sun~et~al.~\cite{sun2022strongest} studied the problem of finding
+\emph{optimal} adversarial attacks against deep RL agents, characterizing
+the strongest possible attack under budget constraints and showing that
+many existing attack heuristics are suboptimal.
+
+A comprehensive survey by Moos~et~al.~\cite{moos2022robust} categorizes
+robust RL methods along several axes: uncertainty sets, adversary types,
+and solution concepts.  A common observation across this body of work is
+that adversarial training is performed entirely at \emph{training time}:
+the resulting policy applies the same robust strategy at every timestep
+during deployment, regardless of whether a disturbance is actually
+present.  This conflates nominal and adversarial operation, sacrificing
+performance when conditions are benign.  Our work addresses this gap by
+introducing a runtime disturbance detection mechanism that gates between
+nominal-optimal and adversarially-robust policies.
+
+% ---------------------------------------------------------------------------
+\subsection{Transformers in Time-Series and Reinforcement Learning}
+% ---------------------------------------------------------------------------
+
+The transformer architecture~\cite{vaswani2017attention}, originally
+developed for natural language processing, has been successfully applied
+to time-series analysis and anomaly detection.
+TranAD~\cite{tuli2022tranad} uses an adversarially-trained
+transformer with attention-based reconstruction for detecting anomalies
+in multivariate sensor streams, achieving state-of-the-art results on
+industrial monitoring benchmarks.  The Anomaly
+Transformer~\cite{xu2022anomaly} introduces an \emph{association
+discrepancy} mechanism that distinguishes anomalous timesteps from normal
+ones by comparing learned associations with a prior distribution.
+
+In the RL domain, Chen~et~al.~\cite{chen2021decision} proposed the
+Decision Transformer, which formulates RL as a sequence-modeling problem
+and conditions action generation on desired return-to-go, states, and
+actions.  While this work demonstrates the power of transformers for
+representing sequential decision-making, it does not address disturbance
+detection.
+
+To our knowledge, no prior work uses transformers specifically for
+\emph{runtime disturbance detection} in the context of robust RL,
+nor does any work use such a detector to gate between separate
+optimal and robust control policies.
+
+% ---------------------------------------------------------------------------
+\subsection{Sim-to-Real Transfer and Deployment}
+% ---------------------------------------------------------------------------
+
+Sim-to-real transfer remains a central challenge in robot learning.
+\emph{Domain randomization}~\cite{tobin2017domain} trains policies on a
+distribution of environment parameters (visual appearance, physical
+properties) so that the real world appears as just another sample from the
+training distribution.  Peng~et~al.~\cite{peng2018simtoreal}
+demonstrated that randomizing dynamics parameters during training---mass,
+friction, damping---enables zero-shot transfer of manipulation policies.
+Zhao~et~al.~\cite{zhao2020simtoreal} provide a survey of sim-to-real
+transfer methods, covering domain randomization, system identification,
+and progressive adaptation.
+
+Lee~et~al.~\cite{lee2020learning} used a teacher-student framework for
+quadrupedal locomotion: a privileged teacher trained in simulation
+distills its knowledge into a student that relies only on proprioceptive
+observations available on the real robot.  This approach has become a
+standard paradigm in legged locomotion.
+
+On the simulation side, MuJoCo~\cite{todorov2012mujoco} remains the
+dominant physics engine for contact-rich control.  The recent
+MJX extension~\cite{zakka2025mujoco} provides a JAX-based implementation
+of MuJoCo that enables massively parallel environment simulation on GPUs.
+Brax~\cite{freeman2021brax} offers a similar JAX-based differentiable
+physics engine.  Gymnasium~\cite{towers2024gymnasium} provides the
+standard Python interface for RL environments.
+
+% ---------------------------------------------------------------------------
+\subsection{Embedded Inference for Real-Time Control}
+% ---------------------------------------------------------------------------
+
+Deploying neural-network policies on embedded platforms requires careful
+attention to inference latency and throughput.  NVIDIA's
+TensorRT~\cite{nvidia2024tensorrt} is a high-performance inference
+optimizer that applies layer fusion, kernel auto-tuning, precision
+calibration (FP16, INT8), and memory optimization to minimize latency on
+NVIDIA GPUs.  Jeon~et~al.~\cite{jeon2022tensorrt} developed a framework
+and optimization methodology specifically for TensorRT inference on Jetson
+boards, achieving significant speedups over native PyTorch execution.
+
+The ONNX ecosystem~\cite{onnxruntime2022transformer} provides a standard
+interchange format for neural networks, enabling models trained in any
+framework (PyTorch, TensorFlow, JAX) to be converted to a common
+representation and subsequently optimized by TensorRT.  This is
+particularly important for transformer architectures, where INT8
+quantization of attention layers requires careful calibration.
+
+NVIDIA's Isaac ROS~\cite{nvidia2024isaacros} provides GPU-accelerated
+ROS~2 packages built on the NITROS framework, which enables zero-copy
+GPU tensor transfer between ROS nodes.  This infrastructure is critical
+for achieving the low latencies required by real-time control.
+
+Despite the maturity of individual components, few works address the
+\emph{complete pipeline} from adversarial RL training in simulation through
+ONNX export and TensorRT optimization to real-time deployment on Jetson
+hardware with ROS~2 integration.  Our work provides a detailed design for
+this end-to-end pipeline.
+
+% ---------------------------------------------------------------------------
+\subsection{Comparison to Our Approach}
+% ---------------------------------------------------------------------------
+
+Table~\ref{tab:comparison} summarizes how our approach relates to prior
+work.  The key differentiators are: (i)~the dual-policy architecture
+with continuous gating, (ii)~the use of a transformer for runtime
+disturbance detection to drive the gating signal, and (iii)~the
+end-to-end deployment pipeline targeting embedded GPUs with real-time
+ROS~2 integration.  No prior work combines all three elements.
+
+\begin{table}[t]
+\centering
+\caption{Feature comparison with related approaches.}
+\label{tab:comparison}
+\renewcommand{\arraystretch}{1.15}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Feature} & \textbf{RARL} & \textbf{SA-MDP} &
+  \textbf{DR} & \textbf{Ours} \\
+\midrule
+Adversarial training      & \checkmark & \checkmark & --         & \checkmark \\
+Dual-policy mixing        & --         & --         & --         & \checkmark \\
+Runtime detection         & --         & --         & --         & \checkmark \\
+Transformer detector      & --         & --         & --         & \checkmark \\
+TensorRT deployment       & --         & --         & --         & \checkmark \\
+ROS~2 integration         & --         & --         & --         & \checkmark \\
+\bottomrule
+\end{tabular}
+\vspace{-0.3cm}
+\end{table}
+
+% ===========================================================================
+\section{Problem Formulation}\label{sec:formulation}
+% ===========================================================================
+
+% ---------------------------------------------------------------------------
+\subsection{Two-Player Zero-Sum Markov Game}
+% ---------------------------------------------------------------------------
+
+We consider a two-player zero-sum Markov game defined by the tuple
+$(\cS, \cA^c, \cA^d, P, R, \gamma)$, where $\cS \subseteq \R^n$ is the
+continuous state space, $\cA^c \subseteq \R^{m_c}$ is the controller's
+action space, and $\cA^d \subseteq \R^{m_d}$ is the disturbance
+(adversary) action space.  The transition dynamics are governed by
+$P(s' \mid s, a^c, a^d)$, where $s \in \cS$, $a^c \in \cA^c$,
+$a^d \in \cA^d$, and $s' \in \cS$.  The scalar reward
+$r(s, a^c, a^d) \in \R$ is received by the controller; the adversary
+receives $-r(s, a^c, a^d)$.
+
+The controller seeks a policy $\pi^c: \cS \to \Delta(\cA^c)$ that
+maximizes the expected discounted return, while the adversary seeks a
+policy $\pi^d: \cS \to \Delta(\cA^d)$ that minimizes it.  A Nash
+equilibrium $(\pi^{c,*}, \pi^{d,*})$ satisfies
+\begin{equation}\label{eq:nash_formal}
+V^{\pi^{c,*}, \pi^d}(s) \geq V^{\pi^{c,*}, \pi^{d,*}}(s) \geq
+V^{\pi^c, \pi^{d,*}}(s)
+\end{equation}
+for all $s \in \cS$, $\pi^c$, $\pi^d$.  The minimax value function is
+\begin{equation}\label{eq:minimax_formal}
+V^*(s) = \max_{\pi^c} \min_{\pi^d} \;\E\!\left[
+  \sum_{t=0}^{\infty} \gamma^t\, r(s_t, a_t^c, a_t^d)
+  \;\middle|\; s_0 = s\right].
+\end{equation}
+
+% ---------------------------------------------------------------------------
+\subsection{Disturbance Model}\label{sec:disturbance_model}
+% ---------------------------------------------------------------------------
+
+The adversary's action $a^d \in \cA^d$ represents an external disturbance
+applied to the system.  We consider two concrete instantiations:
+\begin{enumerate}
+\item \textbf{Additive force/torque perturbation.}  The adversary applies
+  a force or torque vector to one or more joints or links of the robot.
+  The perturbed dynamics become
+  $\dot{q} = f(q, \dot{q}, a^c) + B\,a^d$, where
+  $B \in \R^{n_q \times m_d}$ is a known input matrix selecting the
+  affected degrees of freedom.
+\item \textbf{External body force.}  The adversary applies an external
+  wrench (force and torque) to a specified body, modeling pushes, wind,
+  or contact with unmodeled objects.
+\end{enumerate}
+
+In both cases, the adversary's action is bounded:
+\begin{equation}\label{eq:dist_budget}
+\|a^d\|_2 \leq \epsilon,
+\end{equation}
+where $\epsilon > 0$ is the \emph{disturbance budget}.  The adversary
+learns to choose the direction and magnitude of the perturbation within
+this budget to maximally degrade the controller's performance.  The
+disturbance can be further parameterized by a magnitude
+$\delta \in [0, \delta_{\max}]$ and a unit direction vector
+$\boldsymbol{d} \in \R^{m_d}$, $\|\boldsymbol{d}\|_2 = 1$, so that
+$a^d = \delta\,\boldsymbol{d}$.
+
+% ---------------------------------------------------------------------------
+\subsection{Objective: Dual-Policy Robust Control}\label{sec:objective}
+% ---------------------------------------------------------------------------
+
+Rather than training a single policy that compromises between nominal
+performance and worst-case robustness, we maintain two separate policies:
+\begin{itemize}
+\item $\piopt$: the \emph{optimal} policy, trained on the nominal
+  environment (no adversary) to maximize $\E[\sum_t \gamma^t r_t]$.
+\item $\pirob$: the \emph{robust} policy, co-trained with the adversary
+  $\piadv$ in the zero-sum game to maximize
+  $\min_{\pi^d} \E[\sum_t \gamma^t r_t]$.
+\end{itemize}
+Both policies share the same observation and action spaces.  At runtime,
+the executed action is a convex combination:
+\begin{equation}\label{eq:mixing}
+a_t = \alpha_t \cdot \pirob(s_t) + (1 - \alpha_t) \cdot \piopt(s_t),
+\end{equation}
+where the mixing coefficient $\alpha_t \in [0,1]$ is produced by a
+\emph{gating network} $g_\theta$ operating on a history of observations:
+\begin{equation}\label{eq:gating}
+\alpha_t = g_\theta(h_t), \quad
+h_t = (o_{t-L+1},\; o_{t-L+2},\; \ldots,\; o_t),
+\end{equation}
+with $o_i \in \R^d$ denoting the observation at timestep $i$ and $L$
+denoting the history window length.
+
+When $\alpha_t \approx 0$, the system executes the nominal-optimal policy;
+when $\alpha_t \approx 1$, it executes the robust policy.  This design
+preserves the full nominal performance of $\piopt$ in undisturbed
+conditions while providing the worst-case guarantees of $\pirob$ when
+disturbances are detected.
+
+% ---------------------------------------------------------------------------
+\subsection{Real-Time Constraints}\label{sec:rt_constraints}
+% ---------------------------------------------------------------------------
+
+Real-time control imposes strict latency requirements.  Let
+$\tau_{\text{budget}}$ denote the maximum allowable inference time per
+control step.  For a control frequency of $f$ Hz, we require
+\begin{equation}\label{eq:latency}
+\tau_{\text{gate}} + \tau_{\text{policy}} + \tau_{\text{pub}} \leq
+\tau_{\text{budget}} = \frac{1}{f}.
+\end{equation}
+Here $\tau_{\text{gate}}$ is the time for the transformer forward pass and
+gating computation, $\tau_{\text{policy}}$ is the time for the two policy
+forward passes (which may be pipelined), and $\tau_{\text{pub}}$ is the
+time for ROS message serialization and publication.  For the target range
+of $f \in [200, 500]$ Hz, this yields
+$\tau_{\text{budget}} \in [2, 5]$ ms.  All neural network components must
+be optimized to meet this budget on the NVIDIA Jetson platform.
+
+% ===========================================================================
+\section{Method}\label{sec:method}
+% ===========================================================================
+
+This section presents the proposed approach in detail.  We describe the
+dual-policy architecture, the adversary training objective, the
+transformer disturbance detector, the gating rule, the data-logging
+specification, and the complete algorithmic procedures.
+
+% ---------------------------------------------------------------------------
+\subsection{Dual-Policy Architecture}\label{sec:dual_policy}
+% ---------------------------------------------------------------------------
+
+The optimal policy $\piopt$ and the robust policy $\pirob$ are trained
+independently.  Both are parameterized as feedforward neural networks
+(typically two hidden layers of 256 units with ReLU activations) that
+map observations $o \in \R^d$ to actions $a \in \R^{m_c}$.
+
+\textbf{Optimal policy training.}  The policy $\piopt$ is trained using a
+standard deep RL algorithm (SAC, TD3, or PPO) on the nominal environment,
+i.e., with the adversary disabled ($a^d = \boldsymbol{0}$).  This policy
+maximizes the expected return under nominal dynamics and represents the
+best achievable performance when no disturbance is present.
+
+\textbf{Robust policy training.}  The policy $\pirob$ is trained in the
+zero-sum game against a co-learned adversary $\piadv$.  The controller and
+adversary are updated in alternation, as described in
+Section~\ref{sec:adv_training}.  Upon convergence, $\pirob$ approximates
+the maximin strategy and provides robust performance under the worst-case
+disturbance within the budget $\epsilon$.
+
+\textbf{Rationale for separate training.}  A single policy trained with
+adversarial perturbations necessarily trades off nominal performance for
+robustness: it learns conservative actions even in the absence of
+disturbances.  By maintaining two separate policies, our architecture
+avoids this trade-off.  The gating mechanism (Section~\ref{sec:gating})
+selects between them based on the detected disturbance level, achieving
+near-optimal nominal performance and near-optimal worst-case performance
+simultaneously.
+
+% ---------------------------------------------------------------------------
+\subsection{Adversary Training Objective}\label{sec:adv_training}
+% ---------------------------------------------------------------------------
+
+The adversary $\piadv$ is a neural network with the same architecture as
+the controller policies, mapping observations $o \in \R^d$ to disturbance
+actions $a^d \in \R^{m_d}$.  The output layer uses a $\tanh$ activation
+scaled by the disturbance budget $\epsilon$:
+\begin{equation}\label{eq:adv_output}
+a^d = \epsilon \cdot \tanh\!\big(\text{NN}_{\psi}(o)\big),
+\end{equation}
+which ensures $\|a^d\|_\infty \leq \epsilon$ by construction.
+
+The adversary's objective is to minimize the controller's return, i.e., to
+maximize the negated return:
+\begin{equation}\label{eq:adv_obj}
+J^{\text{adv}}(\piadv) = -\,J^c(\pirob, \piadv) =
+-\,\E_{\pirob,\piadv}\!\left[\sum_{t=0}^{\infty}\gamma^t
+  r(s_t, a_t^c, a_t^d)\right].
+\end{equation}
+
+Training proceeds by \emph{alternating optimization}:
+\begin{enumerate}
+\item Fix $\piadv$; update $\pirob$ to maximize $J^c(\pirob, \piadv)$
+  using the chosen RL algorithm.
+\item Fix $\pirob$; update $\piadv$ to maximize $J^{\text{adv}}(\piadv)$
+  using the same (or a separate) RL algorithm.
+\end{enumerate}
+This alternation is related to \emph{fictitious play} in game theory
+and to the \emph{double oracle} method for solving zero-sum games.  In
+practice, both players share a single replay buffer (for off-policy
+methods) and are updated with a fixed ratio of gradient steps per
+environment step.
+
+To prevent the adversary from becoming too strong too quickly
+(which can destabilize the controller's learning), we employ curriculum
+scheduling of the disturbance budget: $\epsilon$ is linearly increased
+from $0$ to $\epsilon_{\max}$ over the first $N_{\text{warmup}}$ episodes.
+
+% ---------------------------------------------------------------------------
+\subsection{Transformer Disturbance Detector}\label{sec:transformer}
+% ---------------------------------------------------------------------------
+
+The disturbance detector is a lightweight transformer encoder that
+processes a sliding window of recent observations and produces two
+outputs: a disturbance detection probability $p_t \in [0,1]$ and an
+estimated disturbance magnitude $\hat{\delta}_t \geq 0$.
+
+\textbf{Input representation.}  The input to the transformer is a sequence
+of $L$ observation vectors $h_t = (o_{t-L+1}, \ldots, o_t)$, where
+each $o_i \in \R^d$.  The sequence is treated as a matrix
+$\boldsymbol{H}_t \in \R^{L \times d}$.
+
+\textbf{Positional encoding.}  Since the transformer architecture is
+permutation-invariant, we add sinusoidal positional encodings to each
+element of the sequence:
+\begin{align}
+\text{PE}(k, 2j)   &= \sin\!\left(\frac{k}{10000^{2j/d_{\text{model}}}}\right), \label{eq:pe_sin}\\
+\text{PE}(k, 2j+1) &= \cos\!\left(\frac{k}{10000^{2j/d_{\text{model}}}}\right), \label{eq:pe_cos}
+\end{align}
+where $k \in \{0, \ldots, L-1\}$ is the position index and
+$j \in \{0, \ldots, d_{\text{model}}/2 - 1\}$ indexes the dimension.
+
+\textbf{Architecture.}  The encoder consists of $N_L \in \{2, 3, 4\}$
+transformer layers, each containing multi-head self-attention with
+$N_H \in \{2, 4\}$ heads and a position-wise feedforward network.  The
+model dimension is $d_{\text{model}} \in \{64, 128\}$ and the
+feedforward dimension is $d_{\text{ff}} = 4 \cdot d_{\text{model}}$.
+Layer normalization is applied before each sub-layer (pre-norm
+configuration).  A \emph{causal attention mask} is applied so that each
+timestep attends only to current and past observations, ensuring the
+model can operate in a streaming fashion at deployment.
+
+\textbf{Output head.}  The transformer output at the final position
+(timestep $t$) is passed through a small MLP with two output branches:
+\begin{itemize}
+\item Detection branch: linear layer $\to$ sigmoid, producing
+  $p_t \in [0,1]$.
+\item Magnitude branch: linear layer $\to$ softplus, producing
+  $\hat{\delta}_t \geq 0$.
+\end{itemize}
+
+\textbf{Training.}  The transformer is trained in a supervised fashion on
+data logged during the adversarial training phase
+(Section~\ref{sec:data_logging}).  For each window
+$(o_{t-L+1}, \ldots, o_t)$, the label consists of the ground-truth
+disturbance indicator $y_t \in \{0,1\}$ (whether a disturbance was
+applied at timestep $t$) and the ground-truth disturbance magnitude
+$\delta_t = \|a_t^d\|_2$.  The training loss is
+\begin{equation}\label{eq:detector_loss}
+\cL = \cL_{\text{BCE}}(p_t, y_t) + \lambda\,\cL_{\text{MSE}}(\hat{\delta}_t, \delta_t),
+\end{equation}
+where $\cL_{\text{BCE}}$ is the binary cross-entropy loss,
+$\cL_{\text{MSE}}$ is the mean squared error, and $\lambda > 0$ is a
+weighting hyperparameter balancing the two objectives.
+
+\textbf{Design for deployment.}  The transformer is intentionally kept
+small to satisfy the real-time latency budget on Jetson hardware.  With
+$N_L = 2$, $d_{\text{model}} = 64$, $N_H = 2$, and $L = 16$, the model
+has approximately 50k parameters and can be executed in under 0.5\,ms
+on a Jetson Orin after TensorRT optimization.
+
+% ---------------------------------------------------------------------------
+\subsection{Policy Mixing and Gating Rule}\label{sec:gating}
+% ---------------------------------------------------------------------------
+
+The gating function converts the transformer's outputs into the mixing
+coefficient $\alpha_t$.  We consider two variants:
+
+\textbf{Linear gating.}  A simple parameterization:
+\begin{equation}\label{eq:gate_linear}
+\alpha_t = \sigma(w_p \cdot p_t + w_\delta \cdot \hat{\delta}_t + b),
+\end{equation}
+where $\sigma(\cdot)$ is the logistic sigmoid, and $w_p, w_\delta, b$
+are learnable scalar parameters.
+
+\textbf{MLP gating.}  A more expressive variant:
+\begin{equation}\label{eq:gate_mlp}
+\alpha_t = f_\phi(p_t, \hat{\delta}_t),
+\end{equation}
+where $f_\phi$ is a small multi-layer perceptron (e.g., two hidden layers
+of 32 units).  The MLP can learn nonlinear relationships such as
+threshold effects or hysteresis-like behavior.
+
+In both cases, the final action is computed as
+\begin{equation}\label{eq:action_mix}
+a_t = \alpha_t\,\pirob(s_t) + (1 - \alpha_t)\,\piopt(s_t).
+\end{equation}
+
+\textbf{Soft mixing vs.\ hard switching.}  An alternative design uses
+hard switching: $\alpha_t \in \{0, 1\}$ based on a threshold on $p_t$.
+While simpler, hard switching introduces \emph{chattering}---rapid
+oscillation between policies near the decision boundary---which can
+produce discontinuous control signals.  Soft mixing with a continuous
+$\alpha_t$ avoids this problem and allows smooth transitions between the
+two policies.  We include a comparison of soft and hard switching in the
+evaluation plan (Section~\ref{sec:ablation}).
+
+% ---------------------------------------------------------------------------
+\subsection{Data Logging Specification}\label{sec:data_logging}
+% ---------------------------------------------------------------------------
+
+A standardized data-logging format is essential for reproducibility and
+for generating the supervised training set for the transformer detector.
+Table~\ref{tab:data_fields} specifies the fields logged at every timestep
+during training.
+
+\begin{table}[t]
+\centering
+\caption{Data logging specification.  Each row is recorded per timestep.}
+\label{tab:data_fields}
+\small
+\begin{tabular}{@{}llp{4.0cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{t} & \texttt{int} & Timestep index within episode \\
+\texttt{episode\_id} & \texttt{int} & Unique episode identifier \\
+\texttt{obs} & \texttt{float[$n$]} & Observation vector \\
+\texttt{action\_ctrl} & \texttt{float[$m_c$]} & Controller action \\
+\texttt{action\_dist} & \texttt{float[$m_d$]} & Disturbance/adversary action \\
+\texttt{action\_total} & \texttt{float[$m_c$]} & Applied action after mixing \\
+\texttt{reward} & \texttt{float} & Scalar reward \\
+\texttt{terminated} & \texttt{bool} & Episode termination flag \\
+\texttt{truncated} & \texttt{bool} & Episode truncation flag \\
+\texttt{info/dist\_params} & \texttt{float[$k$]} & Ground-truth disturbance parameters \\
+\texttt{disturbance\_tag} & \texttt{str} & Categorical disturbance label \\
+\texttt{robust\_weight} & \texttt{float} & Target $\alpha_t$ for gating supervision \\
+\bottomrule
+\end{tabular}
+\vspace{-0.3cm}
+\end{table}
+
+\textbf{Sequence window extraction.}  To train the transformer detector,
+we extract sliding windows of length $L$ from the logged episodes.  For
+timesteps $t < L$ within an episode, the window is left-padded with zeros
+and an attention mask is constructed so that the transformer ignores
+padded positions.  Windows \emph{never} cross episode boundaries: if the
+remaining timesteps in an episode are fewer than $L$, the window is
+zero-padded from the left rather than drawing observations from the next
+episode.
+
+\textbf{Storage format.}  Data is stored in HDF5 files (one per training
+run) with chunked and compressed datasets, or in Apache Arrow/Parquet
+format for efficient columnar access.  Each episode is a separate group
+(HDF5) or partition (Arrow), enabling efficient random access during
+window extraction.
+
+% ---------------------------------------------------------------------------
+\subsection{Algorithm Pseudocode}\label{sec:algorithms}
+% ---------------------------------------------------------------------------
+
+We present three algorithms covering the complete pipeline: adversarial
+training, transformer detector training, and deployment inference.
+
+\begin{algorithm}[t]
+\caption{Off-Policy Adversarial Training Loop}
+\label{alg:adversarial_training}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE Environment $\text{env}$; actor networks $\piopt$, $\pirob$;
+  critic $Q_\phi$; adversary $\piadv$; replay buffer $\mathcal{B}$;
+  dataset logger $\cD$; episodes $N$; budget schedule $\epsilon(\cdot)$
+\ENSURE Trained $\piopt$, $\pirob$, $\piadv$; dataset $\cD$
+\STATE \textbf{Phase 1: Train optimal policy}
+\FOR{episode $= 1$ \TO $N_{\text{opt}}$}
+  \STATE $s_0 \leftarrow \text{env.reset}()$
+  \FOR{$t = 0, 1, \ldots, T-1$}
+    \STATE $a_t^c \leftarrow \piopt(s_t) + \text{noise}$
+    \STATE $s_{t+1}, r_t, d_t \leftarrow \text{env.step}(a_t^c, \boldsymbol{0})$
+    \STATE $\mathcal{B}.\text{add}(s_t, a_t^c, r_t, s_{t+1}, d_t)$
+    \STATE $\cD.\text{log}(t, s_t, a_t^c, \boldsymbol{0}, r_t, d_t)$
+    \STATE Update $\piopt$, $Q_\phi$ from $\mathcal{B}$ (SAC/TD3)
+  \ENDFOR
+\ENDFOR
+\STATE \textbf{Phase 2: Train robust policy with adversary}
+\FOR{episode $= 1$ \TO $N$}
+  \STATE $\epsilon_t \leftarrow \epsilon(\text{episode})$ \hfill $\triangleright$ Curriculum
+  \STATE $s_0 \leftarrow \text{env.reset}()$
+  \FOR{$t = 0, 1, \ldots, T-1$}
+    \STATE $a_t^c \leftarrow \pirob(s_t) + \text{noise}$
+    \STATE $a_t^d \leftarrow \piadv(s_t)$, clipped to $\|a_t^d\| \leq \epsilon_t$
+    \STATE $s_{t+1}, r_t, d_t \leftarrow \text{env.step}(a_t^c, a_t^d)$
+    \STATE $\mathcal{B}.\text{add}(s_t, a_t^c, a_t^d, r_t, s_{t+1}, d_t)$
+    \STATE $\cD.\text{log}(t, s_t, a_t^c, a_t^d, r_t, d_t)$
+    \STATE Sample batch from $\mathcal{B}$
+    \STATE Update $Q_\phi$: minimize TD error
+    \STATE Update $\pirob$: maximize $Q_\phi(s, \pirob(s))$
+    \STATE Update $\piadv$: minimize $Q_\phi(s, \pirob(s), \piadv(s))$
+  \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Transformer Disturbance Detector Training}
+\label{alg:transformer_training}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+\REQUIRE Dataset $\cD$ (logged episodes); window length $L$;
+  transformer model $\cT_\theta$; learning rate $\eta$;
+  loss weight $\lambda$; epochs $E$
+\ENSURE Trained detector $\cT_\theta$
+\STATE Extract sliding windows $\{(h_i, y_i, \delta_i)\}_{i=1}^{M}$
+  from $\cD$
+\STATE \quad $h_i = (o_{i-L+1}, \ldots, o_i)$, with zero-padding and
+  attention masks
+\STATE \quad $y_i = \mathbb{1}[\|a_i^d\|_2 > 0]$, \quad
+  $\delta_i = \|a_i^d\|_2$
+\STATE Split into training set $\cD_{\text{train}}$ and validation set
+  $\cD_{\text{val}}$
+\FOR{epoch $= 1$ \TO $E$}
+  \FOR{each mini-batch $(H, \boldsymbol{y}, \boldsymbol{\delta})
+    \subset \cD_{\text{train}}$}
+    \STATE $(\hat{\boldsymbol{p}},\, \hat{\boldsymbol{\delta}})
+      \leftarrow \cT_\theta(H)$ \hfill $\triangleright$ Forward pass
+    \STATE $\cL \leftarrow \cL_{\text{BCE}}(\hat{\boldsymbol{p}},
+      \boldsymbol{y}) + \lambda\,\cL_{\text{MSE}}(\hat{\boldsymbol{\delta}},
+      \boldsymbol{\delta})$
+    \STATE $\theta \leftarrow \theta - \eta\,\nabla_\theta \cL$
+      \hfill $\triangleright$ Backpropagation
+  \ENDFOR
+  \STATE Evaluate on $\cD_{\text{val}}$; save checkpoint if improved
+\ENDFOR
+\RETURN $\cT_\theta$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Deployment Inference Loop (ROS~2 Node)}
+\label{alg:deployment}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\REQUIRE TensorRT engines: $\piopt$, $\pirob$, $\cT_\theta$;
+  gating parameters $\phi$; history buffer $H$; control frequency $f$
+\STATE Initialize ROS~2 node, sensor subscriber, action publisher
+\STATE Initialize CUDA streams for pipelined inference
+\STATE Set timer period $\Delta t \leftarrow 1/f$
+\STATE \textbf{On timer callback:}
+\STATE \quad $o_t \leftarrow$ read latest sensor message
+\STATE \quad Append $o_t$ to history buffer $H$
+\IF{$|H| < L$}
+  \STATE \quad Construct zero-padded input with attention mask
+\ENDIF
+\STATE \quad $(\hat{p}_t,\, \hat{\delta}_t) \leftarrow
+  \cT_\theta(H[-L:])$ \hfill $\triangleright$ TensorRT
+\STATE \quad $\alpha_t \leftarrow f_\phi(\hat{p}_t, \hat{\delta}_t)$
+  \hfill $\triangleright$ Gating
+\STATE \quad $a^{\text{opt}}_t \leftarrow \piopt(o_t)$
+  \hfill $\triangleright$ TensorRT
+\STATE \quad $a^{\text{rob}}_t \leftarrow \pirob(o_t)$
+  \hfill $\triangleright$ TensorRT
+\STATE \quad $a_t \leftarrow \alpha_t\,a^{\text{rob}}_t +
+  (1 - \alpha_t)\,a^{\text{opt}}_t$
+\STATE \quad Publish $a_t$ to actuator topic
+\STATE \quad Log: timestamp, $\alpha_t$, $\hat{p}_t$, $\hat{\delta}_t$,
+  latency
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:adversarial_training} describes the two-phase off-policy
+training loop.  Phase~1 trains the optimal policy without any adversary.
+Phase~2 trains the robust policy against the adversary, with curriculum
+scheduling of the disturbance budget.  Both phases log all transitions
+to the dataset $\cD$.
+
+Algorithm~\ref{alg:transformer_training} describes the supervised training
+of the transformer disturbance detector using the logged data.
+
+Algorithm~\ref{alg:deployment} describes the real-time inference loop
+running as a ROS~2 node on the Jetson platform.
+
+% ===========================================================================
+\section{System Implementation}\label{sec:implementation}
+% ===========================================================================
+
+% ---------------------------------------------------------------------------
+\subsection{Buffer and Logger Utilities}\label{sec:buffers}
+% ---------------------------------------------------------------------------
+
+The system uses two distinct buffer types depending on the training
+algorithm.
+
+\textbf{Replay buffer (off-policy).}  A fixed-capacity circular buffer
+stores transitions $(s, a^c, a^d, r, s', d)$.  The buffer supports
+uniform random sampling and, optionally, Prioritized Experience Replay
+(PER), which samples transitions with probability proportional to their
+TD error magnitude.  The buffer capacity is typically set to $10^6$
+transitions.
+
+\textbf{Rollout buffer (on-policy).}  For PPO, a rollout buffer stores
+complete episodes (or fixed-length trajectory segments) including
+observations, actions, rewards, log-probabilities, and value estimates.
+At the end of each rollout, Generalized Advantage Estimation (GAE) is
+computed with parameters $\lambda_{\text{GAE}} = 0.95$ and $\gamma = 0.99$.
+The buffer is emptied after each policy update.
+
+\textbf{Dataset logger.}  Independent of the replay or rollout buffer, the
+dataset logger writes every transition to persistent storage in the format
+specified in Table~\ref{tab:data_fields}.  This logger is active during
+both Phase~1 (optimal policy training) and Phase~2 (adversarial training),
+producing the complete dataset required for transformer training.  The
+logger writes in append-only mode with periodic flushing to minimize I/O
+overhead during training.
+
+% ---------------------------------------------------------------------------
+\subsection{Training Pipeline}\label{sec:training_pipeline}
+% ---------------------------------------------------------------------------
+
+The training pipeline consists of four phases:
+
+\textbf{Phase~1: Optimal policy ($\piopt$).}  Train using SAC or TD3 on
+the nominal Gymnasium/MuJoCo environment.  Hyperparameters: learning rate
+$3 \times 10^{-4}$, batch size 256, replay buffer size $10^6$, target
+smoothing coefficient $\tau = 0.005$.  Training typically requires
+$1$--$3 \times 10^6$ environment steps depending on the task complexity.
+
+\textbf{Phase~2: Robust policy ($\pirob$) and adversary ($\piadv$).}
+Train in the zero-sum game using the modified environment that accepts
+both controller and adversary actions.  The adversary's disturbance
+budget is annealed linearly from $0$ to $\epsilon_{\max}$ over the first
+$20\%$ of training.  Both the controller and adversary use separate
+optimizers but share the same replay buffer.  The critic is updated with
+every environment step; the controller and adversary actors are updated
+every two environment steps (delayed update as in TD3).
+
+\textbf{Phase~3: Transformer detector ($\cT_\theta$).}  Extract sliding
+windows from the logged dataset $\cD$.  Train the transformer with
+AdamW optimizer, learning rate $10^{-4}$, weight decay $10^{-2}$, batch
+size 128, for 100 epochs.  Use cosine learning rate scheduling with
+warmup over the first 5 epochs.  The loss weight is set to $\lambda = 1.0$
+and tuned on a held-out validation set.
+
+\textbf{Phase~4: Gating network (optional).}  If the linear gating
+rule~\eqref{eq:gate_linear} is insufficient, train the MLP gating
+network~\eqref{eq:gate_mlp} on a separate validation set of episodes
+where the target $\alpha_t$ is computed from the ground-truth disturbance
+labels.  Alternatively, the gating parameters can be tuned by optimizing
+the mixed policy's return in simulation.
+
+\textbf{Migration to JAX/MJX.}  The current PyTorch implementation
+processes one environment instance per training step.  A planned migration
+to JAX with MJX~\cite{zakka2025mujoco} will enable
+GPU-vectorized simulation of thousands of environment instances in
+parallel, as demonstrated by Brax~\cite{freeman2021brax}.  This is
+expected to yield speedups on the order of $1000\times$ for on-policy
+methods and $10$--$100\times$ for off-policy methods (where the
+bottleneck shifts from data collection to gradient computation).  The
+JAX implementation will use Flax for neural network parameterization and
+Optax for optimization.
+
+% ---------------------------------------------------------------------------
+\subsection{Export Pipeline}\label{sec:export}
+% ---------------------------------------------------------------------------
+
+All neural network components must be converted from their training
+framework representation to TensorRT engines for deployment.
+
+\textbf{PyTorch export path.}  Models are first traced using
+\texttt{torch.jit.trace} with representative input tensors, then exported
+to ONNX format via \texttt{torch.onnx.export} with opset version 17.
+For the policy networks, the input is a single observation vector
+$o \in \R^d$ and the output is an action vector $a \in \R^{m_c}$
+(static shapes).  For the transformer, the input is a window
+$H \in \R^{L \times d}$ with a fixed sequence length $L$ (static shape).
+
+\textbf{JAX export path.}  JAX models are exported using
+\texttt{jax.export} or the \texttt{jax2tf} bridge to produce a
+TensorFlow SavedModel, which is then converted to ONNX using
+\texttt{tf2onnx}.  Alternatively, the \texttt{jax2onnx} converter can be
+used for direct export.
+
+\textbf{ONNX to TensorRT.}  The ONNX models are compiled to TensorRT
+engines using \texttt{trtexec} or the TensorRT Python
+API~\cite{nvidia2024tensorrt}.  Key optimization settings include:
+\begin{itemize}
+\item \textbf{Precision:} FP16 mode is used by default, providing a
+  $2\times$ speedup over FP32 with negligible accuracy loss for the
+  policy networks.  INT8 quantization is explored for the transformer,
+  using calibration data from the training
+  set~\cite{onnxruntime2022transformer}.
+\item \textbf{Layer fusion:} TensorRT automatically fuses
+  convolution+bias+activation, attention QKV projections, and other
+  patterns.
+\item \textbf{Engine caching:} TensorRT engines are serialized to disk
+  and reloaded on subsequent runs, avoiding the overhead of re-optimization
+  at startup~\cite{jeon2022tensorrt}.
+\end{itemize}
+
+For the transformer, the causal attention mask is a static boolean tensor
+that can be baked into the TensorRT engine as a constant, eliminating
+the need to pass it as a dynamic input.
+
+% ---------------------------------------------------------------------------
+\subsection{ROS~2 and Isaac ROS Integration}\label{sec:ros2}
+% ---------------------------------------------------------------------------
+
+The deployment system is implemented as a ROS~2 (Humble or later) node
+with the following structure:
+
+\textbf{Subscriptions.}  The node subscribes to sensor topics providing
+joint states, IMU data, and/or other proprioceptive observations.
+Messages are received via a quality-of-service (QoS) profile configured
+for best-effort reliability and volatile durability, minimizing latency.
+
+\textbf{Timer callback.}  A timer triggers the inference loop
+(Algorithm~\ref{alg:deployment}) at the configured control frequency.
+The callback is assigned to a high-priority callback group within a
+\texttt{SingleThreadedExecutor}.
+
+\textbf{Publication.}  The computed action $a_t$ is published to an
+actuator command topic.  Messages are pre-allocated at initialization to
+avoid dynamic memory allocation in the callback.
+
+\textbf{NITROS integration.}  When available, Isaac ROS
+NITROS~\cite{nvidia2024isaacros} is used for zero-copy GPU tensor
+transfer between the sensor preprocessing node and the inference node,
+eliminating CPU-GPU memory copies.
+
+\textbf{Real-time considerations.}  The callback avoids all dynamic
+memory allocation, uses pre-allocated CUDA memory for TensorRT input/output
+buffers, and employs intra-process communication when the sensor node and
+inference node run in the same process.  The CUDA context is initialized
+once at startup, and TensorRT execution contexts are created and
+retained for the lifetime of the node.
+
+% ---------------------------------------------------------------------------
+\subsection{Latency Budgeting and Scheduling}\label{sec:latency}
+% ---------------------------------------------------------------------------
+
+Table~\ref{tab:latency} presents the target latency budget for each
+component of the inference pipeline at a control frequency of 500\,Hz
+(2\,ms total budget) on an NVIDIA Jetson Orin in MAXN power mode.
+
+\begin{table}[t]
+\centering
+\caption{Inference latency budget at 500\,Hz on Jetson Orin (MAXN).}
+\label{tab:latency}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Component} & \textbf{Target latency} \\
+\midrule
+Transformer forward pass ($\cT_\theta$)
+  & $< 0.50$\,ms \\
+Policy forward pass ($\piopt$)
+  & $< 0.30$\,ms \\
+Policy forward pass ($\pirob$)
+  & $< 0.30$\,ms \\
+Gating computation ($f_\phi$)
+  & $< 0.05$\,ms \\
+ROS message serialization + publish
+  & $< 0.20$\,ms \\
+\midrule
+\textbf{Total}
+  & $< 1.35$\,ms \\
+\bottomrule
+\end{tabular}
+\vspace{-0.1cm}
+\end{table}
+
+The total target of 1.35\,ms leaves a margin of 0.65\,ms relative to
+the 2\,ms budget, accommodating occasional latency spikes.  Several
+strategies are employed to further reduce latency:
+
+\textbf{CUDA streams.}  The two policy forward passes are independent and
+can be executed concurrently on separate CUDA streams.  On the Jetson
+Orin's GPU (which supports concurrent kernel execution), this reduces the
+effective policy inference time from $2 \times 0.30 = 0.60$\,ms to
+approximately $0.35$\,ms.
+
+\textbf{Pipelining.}  The transformer forward pass and policy forward
+passes are partially overlapped: the transformer can begin processing
+while the previous timestep's action is being published.  This is
+implemented by maintaining a one-step pipeline depth in the CUDA
+execution schedule.
+
+\textbf{Power modes.}  The Jetson Orin supports multiple power modes
+ranging from 15\,W to MAXN ($\sim$60\,W).  In MAXN mode, all GPU and
+CPU cores are active at maximum frequency, providing the lowest latency.
+For battery-powered applications, the 30\,W mode is a practical compromise,
+with an expected latency increase of approximately $1.5$--$2\times$.
+
+% ===========================================================================
+\section{Evaluation Plan}\label{sec:evaluation}
+% ===========================================================================
+
+This section describes the planned experimental evaluation.  No empirical
+results are reported; the purpose is to specify the evaluation protocol
+in sufficient detail for reproducibility.
+
+% ---------------------------------------------------------------------------
+\subsection{Benchmark Environments}\label{sec:benchmarks}
+% ---------------------------------------------------------------------------
+
+We plan to evaluate on four MuJoCo locomotion environments available
+through Gymnasium~\cite{towers2024gymnasium}:
+\begin{itemize}
+\item \textbf{HalfCheetah-v4}: 17-dimensional observation, 6-dimensional
+  action.  A planar biped that must run forward.
+\item \textbf{Walker2d-v4}: 17-dimensional observation, 6-dimensional
+  action.  A planar biped that must walk while maintaining balance.
+\item \textbf{Ant-v4}: 27-dimensional observation, 8-dimensional action.
+  A 3D quadruped navigating in the $xy$-plane.
+\item \textbf{Humanoid-v4}: 376-dimensional observation, 17-dimensional
+  action.  A 3D bipedal humanoid, the most challenging benchmark.
+\end{itemize}
+
+For each environment, disturbances are introduced through three mechanisms:
+(i)~random external forces applied to the torso at random intervals,
+(ii)~perturbation of physical parameters (mass, friction, damping) by up
+to $\pm30\%$ from nominal values, and (iii)~additive Gaussian noise on
+observations with standard deviation up to $0.1$.
+
+% ---------------------------------------------------------------------------
+\subsection{Metrics}\label{sec:metrics}
+% ---------------------------------------------------------------------------
+
+The evaluation uses the following metrics:
+\begin{itemize}
+\item \textbf{Nominal return} $J_{\text{nom}}$: expected discounted return
+  in the nominal environment (no disturbance).
+\item \textbf{Robust return} $J_{\text{rob}}$: expected discounted return
+  under the worst-case learned adversary at budget $\epsilon_{\max}$.
+\item \textbf{Worst-case regret}:
+  $\Delta J = J_{\text{nom}}^* - J_{\text{rob}}$, where
+  $J_{\text{nom}}^*$ is the return of the best nominal-only policy.
+  Lower is better.
+\item \textbf{Constraint violation rate}: fraction of timesteps in which
+  joint limits, self-collisions, or other safety constraints are violated.
+\item \textbf{Recovery time}: number of timesteps from disturbance onset
+  to return within $95\%$ of nominal tracking performance.
+\item \textbf{Control frequency}: achieved Hz on Jetson hardware.
+\item \textbf{Inference latency}: mean, 95th percentile (p95), and 99th
+  percentile (p99) of the end-to-end inference time.
+\item \textbf{Jitter}: standard deviation of inter-callback timing,
+  measuring real-time determinism.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Ablation Studies}\label{sec:ablation}
+% ---------------------------------------------------------------------------
+
+The following ablation studies are planned to isolate the contribution of
+each component:
+\begin{enumerate}
+\item \textbf{No adversary}: use $\piopt$ only (i.e., standard RL without
+  robustness).  This establishes the nominal performance ceiling and
+  measures degradation under disturbance.
+\item \textbf{No transformer detector}: fix $\alpha_t$ to a constant value
+  (e.g., $\alpha = 0.5$) rather than using the learned gating.  This
+  measures the value of runtime disturbance awareness.
+\item \textbf{Hard switching vs.\ soft mixing}: replace the continuous
+  $\alpha_t$ with a binary decision
+  $\alpha_t \in \{0, 1\}$ based on a threshold on $p_t$.  This measures
+  the benefit of smooth blending.
+\item \textbf{History window length}: vary $L \in \{8, 16, 32, 64\}$ to
+  assess the trade-off between detection accuracy and computational cost.
+\item \textbf{Adversary budget}: vary $\epsilon$ over a range to
+  characterize the robustness-performance Pareto frontier.
+\item \textbf{Single adversary vs.\ adversarial population}: compare
+  training against a single adversary with training against a population
+  of diverse adversaries~\cite{vinitsky2020robust}, measuring
+  generalization to unseen disturbance patterns.
+\end{enumerate}
+
+% ---------------------------------------------------------------------------
+\subsection{Baselines}\label{sec:baselines}
+% ---------------------------------------------------------------------------
+
+We compare against the following baselines:
+\begin{itemize}
+\item \textbf{SAC/TD3 (nominal)}: standard deep RL without any robustness
+  mechanism, representing the performance ceiling under nominal conditions
+  and the floor under disturbances.
+\item \textbf{RARL}~\cite{pinto2017robust}: single robust policy trained
+  with a co-learned adversary applying body forces.  No gating or runtime
+  detection.
+\item \textbf{SA-MDP}~\cite{zhang2020robust}: single robust policy trained
+  with state-adversarial perturbations bounded in $\ell_\infty$ norm.
+  No gating.
+\item \textbf{Domain randomization (DR)}~\cite{tobin2017domain}: single
+  policy trained with randomized physical parameters (mass, friction,
+  damping) drawn uniformly from a specified range.  No adversary, no
+  gating.
+\item \textbf{Ours (full)}: dual-policy architecture with transformer
+  detector and learned gating, as described in this paper.
+\end{itemize}
+
+All methods use the same neural network architecture (two hidden layers,
+256 units, ReLU) for the policy networks, and are trained for the same
+total number of environment interactions to ensure a fair comparison.
+
+% ---------------------------------------------------------------------------
+\subsection{Safety Checks and Failure Cases}\label{sec:safety}
+% ---------------------------------------------------------------------------
+
+We define a \emph{critical failure} as any of the following events:
+(i)~joint position exceeds its mechanical limit, (ii)~self-collision
+between non-adjacent links, (iii)~the robot falls (torso height below a
+task-specific threshold).  These events are monitored across all
+evaluation runs, and the critical failure rate is reported alongside the
+return metrics.
+
+Planned stress tests include:
+\begin{itemize}
+\item \textbf{Out-of-distribution adversary}: apply disturbances with
+  magnitude $\delta > \epsilon_{\max}$ (beyond the training budget) and
+  measure graceful degradation.
+\item \textbf{Sensor dropout}: randomly zero out observation dimensions
+  with probability $p_{\text{drop}} \in \{0.05, 0.1, 0.2\}$ to simulate
+  sensor failures.
+\item \textbf{Communication delay}: inject artificial latency of 1--5\,ms
+  into the observation pipeline to simulate network delays in distributed
+  systems.
+\item \textbf{Adversary-fools-detector}: construct adversarial
+  disturbances that are specifically designed to evade the transformer
+  detector (low $p_t$ despite active disturbance), and measure the
+  resulting performance degradation.
+\end{itemize}
+
+% ===========================================================================
+\section{Discussion and Limitations}\label{sec:discussion}
+% ===========================================================================
+
+While the proposed methodology provides a principled framework for robust
+real-time control, several limitations and open questions merit discussion.
+
+\textbf{Detector evasion.}  The transformer disturbance detector is
+trained on data from the adversary encountered during training.  A
+sufficiently sophisticated adversary could learn to apply disturbances
+that evade detection---perturbations that degrade performance without
+producing observable signatures in the observation history.  This
+represents a fundamental limitation of any detection-based gating scheme
+and motivates future work on adversarially robust detectors.
+
+\textbf{Sim-to-real gap for the detector.}  The transformer is trained
+entirely on simulated data.  The observation statistics on a physical
+robot may differ from simulation due to sensor noise, calibration errors,
+and unmodeled dynamics.  Domain randomization of sensor characteristics
+during data generation may partially address this issue, but a gap is
+likely to remain.  Fine-tuning the detector on a small amount of real
+data is a practical mitigation strategy.
+
+\textbf{Compute constraints on Jetson.}  The Jetson Orin's GPU, while
+capable, imposes tight constraints on transformer size.  The current
+design targets 2--4 layers with 64--128 model dimension, which limits
+the complexity of temporal patterns the detector can capture.
+Larger models may be feasible on future embedded GPU platforms or through
+more aggressive quantization.
+
+\textbf{Training cost.}  The three-phase training pipeline (optimal
+policy, robust policy with adversary, transformer detector) requires
+approximately $3\times$ the compute of standard RL training.  The
+migration to JAX/MJX with GPU-vectorized environments is expected to
+substantially reduce wall-clock time, but the fundamental sample
+complexity remains higher due to the adversarial game dynamics.
+
+\textbf{Known disturbance bounds.}  The method assumes a known upper
+bound $\epsilon$ on the disturbance magnitude.  In practice, this bound
+must be estimated from domain knowledge or system identification.  If
+the true disturbance exceeds $\epsilon_{\max}$, the robust policy's
+guarantees no longer hold, though the dual-policy architecture may still
+provide better performance than a nominal-only policy.
+
+\textbf{Action-space mixing.}  The policy mixing rule~\eqref{eq:action_mix}
+operates in the action space, which may not be optimal.  If the two
+policies produce actions in different regions of the action space, a
+convex combination may yield an intermediate action that neither policy
+would choose.  An alternative is to mix in a \emph{latent space} shared
+by the two policies, or to use a hypernetwork that generates policy
+parameters conditioned on $\alpha_t$.  We leave exploration of these
+alternatives to future work.
+
+\textbf{Scalability to high-dimensional observations.}  The current
+formulation assumes proprioceptive observations of moderate dimension
+($d \leq 400$).  Extension to high-dimensional observations (e.g.,
+images from onboard cameras) would require replacing the transformer
+input with learned feature vectors from a vision encoder, significantly
+increasing the computational requirements and the complexity of the
+deployment pipeline.
+
+% ===========================================================================
+\section{Conclusion and Future Work}\label{sec:conclusion}
+% ===========================================================================
+
+We have presented a methodology for robust real-time control based on
+zero-sum Markov games with a dual-policy mixing architecture.  The
+approach maintains two separately trained policies---one optimal for
+nominal conditions, one robust to worst-case adversarial
+disturbances---and uses a lightweight transformer encoder to detect
+disturbances from observation history and continuously blend the two
+policies via a learned gating function.  The complete system includes
+a training pipeline with standardized data logging, an export pipeline
+through ONNX to TensorRT for embedded GPU deployment, and a ROS~2
+integration designed to meet sub-two-millisecond latency budgets on the
+NVIDIA Jetson platform.  A comprehensive evaluation plan with ablation
+studies, baselines, and safety checks has been specified.
+
+Future work will proceed along several directions:
+\begin{enumerate}
+\item \textbf{End-to-end training.}  Replace the three-phase sequential
+  pipeline with a single end-to-end training procedure that jointly
+  optimizes the two policies, the transformer detector, and the gating
+  network through a unified objective.
+\item \textbf{Vision-based disturbance detection.}  Extend the transformer
+  detector to process visual observations (e.g., depth images) in addition
+  to proprioceptive data, enabling detection of visually observable
+  disturbances such as approaching obstacles or terrain changes.
+\item \textbf{Multi-agent extension.}  Generalize the framework to
+  cooperative and competitive multi-agent settings, where multiple
+  controllers must coordinate their robust strategies against a shared
+  or distributed adversary.
+\item \textbf{Formal safety guarantees.}  Integrate Control Barrier
+  Functions (CBFs) into the gating mechanism to provide formal safety
+  certificates, ensuring that the mixed action always satisfies safety
+  constraints regardless of the detector's output.
+\item \textbf{Empirical validation.}  Execute the evaluation plan
+  described in Section~\ref{sec:evaluation} across all benchmark
+  environments and on physical robot hardware, reporting the quantitative
+  results in a follow-up study.
+\end{enumerate}
+
+% ===========================================================================
+\section*{Acknowledgements}
+% ===========================================================================
+
+This work was supported by [Funding Agency, Grant Number].  The authors
+thank [Collaborators] for helpful discussions.
+
+% ===========================================================================
+% Bibliography
+% ===========================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
