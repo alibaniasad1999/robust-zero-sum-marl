@@ -71,9 +71,11 @@ class TestReplayBuffer:
         buf.add(np.zeros(4), np.zeros(4), np.zeros(2), 0.0, True, False)
         buf.add(np.zeros(4), np.zeros(4), np.zeros(2), 0.0, False, True)
         buf.add(np.zeros(4), np.zeros(4), np.zeros(2), 0.0, False, False)
-        batch = buf.sample(3)
-        done = batch.done
-        assert done.sum().item() >= 2
+        # Check raw buffers directly (sample is random with replacement)
+        term = buf.terminated_buffer[:3].flatten()
+        trunc = buf.truncated_buffer[:3].flatten()
+        done = term | trunc
+        assert done.sum() == 2
 
     def test_sample_insufficient_raises(self):
         small = ReplayBuffer(
