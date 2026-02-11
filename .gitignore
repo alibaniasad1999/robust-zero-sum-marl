@@ -49,3 +49,4 @@ report/*.synctex.gz
 
 # Legacy archive
 Legacy/
+PRIVATE_README.md
