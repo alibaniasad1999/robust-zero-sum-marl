@@ -6,9 +6,16 @@ Usage:
     # Phase 1 — train optimal policy on nominal environment
     python -m src.train --env Ant-v5 --mode nominal --epochs 100
 
+    # Phase 1 with 10 parallel envs (Colab / multi-core)
+    python -m src.train --env Ant-v5 --mode nominal --epochs 100 --num-envs 10
+
     # Phase 2 — train robust policy + adversary in zero-sum game
     python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
         --pi-opt-path logs/nominal/checkpoints
+
+    # Phase 2 with 10 parallel envs
+    python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
+        --num-envs 10 --pi-opt-path logs/nominal/checkpoints
 """
 
 import argparse
@@ -34,6 +41,8 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--start-steps", type=int, default=5000)
     p.add_argument("--update-after", type=int, default=10000)
+    p.add_argument("--num-envs", type=int, default=1,
+                    help="Number of parallel environments (vectorized)")
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--log-dir", type=str, default=None)
     # adversarial-specific
@@ -57,6 +66,7 @@ def main() -> None:
             batch_size=args.batch_size,
             start_steps=args.start_steps,
             update_after=args.update_after,
+            num_envs=args.num_envs,
             device=args.device,
             log_dir=log_dir,
         )
@@ -69,6 +79,7 @@ def main() -> None:
             batch_size=args.batch_size,
             start_steps=args.start_steps,
             update_after=args.update_after,
+            num_envs=args.num_envs,
             device=args.device,
             log_dir=log_dir,
             disturbance_ratio=args.disturbance_ratio,
