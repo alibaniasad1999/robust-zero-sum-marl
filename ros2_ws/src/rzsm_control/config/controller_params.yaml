@@ -1,0 +1,32 @@
+robust_controller_node:
+  ros__parameters:
+    # ── Model paths (absolute paths on Jetson) ─────────────────
+    pi_opt_path: "/opt/rzsm/models/pi_opt.pt"
+    pi_rob_path: "/opt/rzsm/models/pi_rob.pt"
+    detector_path: "/opt/rzsm/models/detector.pt"
+
+    # ── Observation / action dimensions ────────────────────────
+    # Ant-v5:      obs_dim=27, act_dim=8
+    # Humanoid-v5: obs_dim=45, act_dim=17
+    obs_dim: 27
+    act_dim: 8
+    sequence_length: 20
+
+    # ── Network architecture (must match training config) ──────
+    hidden_sizes: [256, 256]
+    act_limit: 1.0
+
+    # ── Transformer architecture ───────────────────────────────
+    d_model: 128
+    nhead: 4
+    num_layers: 3
+    dim_feedforward: 256
+
+    # ── Control parameters ─────────────────────────────────────
+    control_frequency: 200.0   # Hz (200-500 on Jetson Orin)
+    smoothing_window: 5
+    use_smoothing: true
+
+    # ── Device selection ───────────────────────────────────────
+    # "auto" picks CUDA on Jetson, CPU otherwise
+    device: "auto"
