@@ -4,21 +4,24 @@ Entry-point for training DDPG agents.
 
 Usage:
     # Phase 1 — train optimal policy on nominal environment
-    python -m src.train --env Ant-v5 --mode nominal --epochs 100
+    python -m src.train --env Ant-v5 --mode nominal --epochs 100 --seed 0
 
     # Phase 1 with 10 parallel envs (Colab / multi-core)
     python -m src.train --env Ant-v5 --mode nominal --epochs 100 --num-envs 10
 
     # Phase 2 — train robust policy + adversary in zero-sum game
     python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
-        --pi-opt-path logs/nominal/checkpoints
+        --pi-opt-path logs/nominal/seed_0/checkpoints
 
-    # Phase 2 with 10 parallel envs
-    python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
-        --num-envs 10 --pi-opt-path logs/nominal/checkpoints
+    # Multi-seed training (run each seed separately)
+    for seed in 0 1 2 3 4; do
+        python -m src.train --env Ant-v5 --mode nominal --epochs 100 --seed $seed
+    done
+    # Saves to: logs/nominal/seed_0/, logs/nominal/seed_1/, ...
 """
 
 import argparse
+import os
 
 import gymnasium as gym
 
@@ -55,7 +58,8 @@ def main() -> None:
     args = p.parse_args()
 
     env_fn = make_env(args.env)
-    log_dir = args.log_dir or f"logs/{args.mode}"
+    base_log_dir = args.log_dir or f"logs/{args.mode}"
+    log_dir = os.path.join(base_log_dir, f"seed_{args.seed}")
 
     if args.mode == "nominal":
         agent = DDPGAgent(

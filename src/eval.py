@@ -2,10 +2,11 @@
 """
 Evaluation script for comparing RZSM against baselines.
 
-Loads trained checkpoints, runs them across disturbance scenarios,
-and outputs CSV tables + JSON metrics suitable for the paper.
+Supports multi-seed aggregation: automatically discovers seed_*/checkpoints
+directories and reports mean +/- std across seeds.
 
 Usage:
+    # Evaluate all seeds (auto-discovered)
     python -m src.eval --env Ant-v5 --methods vanilla,rarl,rzsm \
         --scenarios nominal,force,params,noise,combined \
         --checkpoint-dir logs/ --episodes 50 --output results/
@@ -13,6 +14,10 @@ Usage:
     # Quick single-method test
     python -m src.eval --env Ant-v5 --methods vanilla --scenarios nominal \
         --episodes 5 --checkpoint-dir logs/
+
+    # Legacy: single-seed (no seed_* subdirectories)
+    python -m src.eval --env Ant-v5 --methods vanilla --scenarios nominal \
+        --checkpoint-dir logs/ --episodes 5
 """
 
 from __future__ import annotations
@@ -68,6 +73,33 @@ def make_scenario_env(env_id: str, scenario: str) -> gym.Env:
         raise ValueError(f"Unknown scenario: {scenario}. "
                          f"Choose from {list(SCENARIOS.keys())}")
     return SCENARIOS[scenario](env)
+
+
+# ======================================================================
+# Seed discovery
+# ======================================================================
+
+def discover_seed_dirs(method_dir: str) -> List[str]:
+    """Find all seed_*/checkpoints directories under a method directory.
+
+    Falls back to method_dir/checkpoints if no seed directories exist
+    (legacy single-seed layout).
+    """
+    seed_dirs = []
+    if os.path.isdir(method_dir):
+        for name in sorted(os.listdir(method_dir)):
+            if name.startswith("seed_"):
+                ckpt = os.path.join(method_dir, name, "checkpoints")
+                if os.path.isdir(ckpt):
+                    seed_dirs.append(ckpt)
+
+    # Fallback: legacy layout without seed subdirectories
+    if not seed_dirs:
+        legacy = os.path.join(method_dir, "checkpoints")
+        if os.path.isdir(legacy):
+            seed_dirs.append(legacy)
+
+    return seed_dirs
 
 
 # ======================================================================
@@ -133,11 +165,7 @@ def load_rzsm_policy(
     nhead: int = 4,
     num_layers: int = 3,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], "RZSMPolicyState"]:
-    """Load full RZSM: pi_opt + pi_rob + transformer detector with blending.
-
-    Returns a policy function and a state object (for accessing detector
-    outputs like dist_prob for metrics).
-    """
+    """Load full RZSM: pi_opt + pi_rob + transformer detector with blending."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
 
     pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
@@ -195,17 +223,11 @@ def evaluate_policy(
     n_episodes: int = 50,
     rzsm_state: Optional[RZSMPolicyState] = None,
 ) -> Dict[str, Any]:
-    """Run policy for n_episodes and collect metrics.
-
-    Returns dict with keys:
-        mean_return, std_return, mean_length, std_length,
-        per_episode (list of dicts), per_step (list of dicts)
-    """
+    """Run policy for n_episodes and collect metrics."""
     ep_returns: List[float] = []
     ep_lengths: List[int] = []
     per_step_data: List[Dict[str, Any]] = []
 
-    # Detection metrics (RZSM only)
     det_true_labels: List[int] = []
     det_pred_probs: List[float] = []
 
@@ -249,18 +271,16 @@ def evaluate_policy(
         "std_return": float(np.std(ep_returns)),
         "mean_length": float(np.mean(ep_lengths)),
         "std_length": float(np.std(ep_lengths)),
-        "per_episode": [{"episode": i, "return": r, "length": l}
-                        for i, (r, l) in enumerate(zip(ep_returns, ep_lengths))],
+        "ep_returns": ep_returns,
+        "ep_lengths": ep_lengths,
         "per_step": per_step_data,
     }
 
-    # Detection metrics
     if det_true_labels:
         result["detection"] = _compute_detection_metrics(
             det_true_labels, det_pred_probs
         )
 
-    # Recovery time
     result["recovery_time"] = _compute_recovery_time(per_step_data, result["mean_return"])
 
     return result
@@ -296,20 +316,14 @@ def _compute_recovery_time(
     per_step_data: List[Dict], nominal_mean_return: float,
     window: int = 20, threshold_frac: float = 0.95,
 ) -> Dict[str, float]:
-    """Compute average recovery time after disturbance onset.
-
-    Recovery = steps from disturbance onset until rolling-window reward
-    exceeds threshold_frac of nominal per-step reward.
-    """
+    """Compute average recovery time after disturbance onset."""
     if not per_step_data or nominal_mean_return == 0:
         return {"mean_recovery_steps": float("nan"), "n_events": 0}
 
-    # Group by episode
     episodes: Dict[int, List[Dict]] = defaultdict(list)
     for s in per_step_data:
         episodes[s["episode"]].append(s)
 
-    # Target per-step reward
     ep_lengths = [len(steps) for steps in episodes.values()]
     target_per_step = nominal_mean_return / max(np.mean(ep_lengths), 1)
     threshold = target_per_step * threshold_frac
@@ -326,7 +340,6 @@ def _compute_recovery_time(
                 in_disturbance = True
                 onset_t = i
             elif not s.get("disturbance_active", False) and in_disturbance:
-                # Disturbance ended, measure recovery
                 for j in range(i, min(i + 200, len(rewards))):
                     start = max(0, j - window)
                     rolling = np.mean(rewards[start:j + 1])
@@ -346,17 +359,63 @@ def _compute_recovery_time(
 
 
 # ======================================================================
-# Main
+# Multi-seed aggregation
 # ======================================================================
 
-METHOD_LOADERS = {
-    "vanilla": "pi",
-    "sa_mdp": "pi",
-    "dr": "pi",
-    "rarl": "pi_rob",
-    "rzsm": "blender",
-}
+def aggregate_seed_results(
+    seed_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Aggregate evaluation results across multiple seeds.
 
+    Takes per-seed mean_return values and computes cross-seed mean and std.
+    This gives the true statistical variation across training runs.
+    """
+    seed_means = [r["mean_return"] for r in seed_results]
+    seed_lengths = [r["mean_length"] for r in seed_results]
+
+    agg = {
+        "mean_return": float(np.mean(seed_means)),
+        "std_return": float(np.std(seed_means)),
+        "mean_length": float(np.mean(seed_lengths)),
+        "std_length": float(np.std(seed_lengths)),
+        "n_seeds": len(seed_results),
+        "per_seed_returns": seed_means,
+        "per_seed_lengths": seed_lengths,
+    }
+
+    # Aggregate detection metrics if present
+    det_results = [r["detection"] for r in seed_results if "detection" in r]
+    if det_results:
+        agg["detection"] = {
+            k: float(np.mean([d[k] for d in det_results]))
+            for k in det_results[0] if isinstance(det_results[0][k], (int, float))
+        }
+        agg["detection_std"] = {
+            k: float(np.std([d[k] for d in det_results]))
+            for k in det_results[0] if isinstance(det_results[0][k], (int, float))
+        }
+
+    # Aggregate recovery time
+    rec_results = [r["recovery_time"] for r in seed_results
+                   if "recovery_time" in r
+                   and not np.isnan(r["recovery_time"].get("mean_recovery_steps", float("nan")))]
+    if rec_results:
+        agg["recovery_time"] = {
+            "mean_recovery_steps": float(np.mean(
+                [r["mean_recovery_steps"] for r in rec_results])),
+            "std_recovery_steps": float(np.std(
+                [r["mean_recovery_steps"] for r in rec_results])),
+            "n_events": sum(r["n_events"] for r in rec_results),
+        }
+    else:
+        agg["recovery_time"] = {"mean_recovery_steps": float("nan"), "n_events": 0}
+
+    return agg
+
+
+# ======================================================================
+# Main
+# ======================================================================
 
 def run_evaluation(args) -> None:
     device = torch.device(
@@ -371,105 +430,141 @@ def run_evaluation(args) -> None:
     os.makedirs(env_out_dir, exist_ok=True)
 
     all_results: List[Dict[str, Any]] = []
+    per_seed_rows: List[Dict[str, Any]] = []
 
     for method in methods:
         print(f"\n{'='*60}")
         print(f"  Method: {method}")
         print(f"{'='*60}")
 
-        ckpt_dir = os.path.join(args.checkpoint_dir, method, "checkpoints")
+        method_dir = os.path.join(args.checkpoint_dir, method)
+        seed_dirs = discover_seed_dirs(method_dir)
 
-        if not os.path.isdir(ckpt_dir):
-            print(f"  [SKIP] Checkpoint dir not found: {ckpt_dir}")
+        if not seed_dirs:
+            print(f"  [SKIP] No checkpoints found in: {method_dir}")
             continue
 
-        # Load policy
-        rzsm_state = None
-        if method in ("vanilla", "sa_mdp", "dr"):
-            policy_fn = load_vanilla_policy(ckpt_dir, args.env, device)
-        elif method == "rarl":
-            policy_fn = load_rarl_policy(ckpt_dir, args.env, device)
-        elif method == "rzsm":
-            pi_opt_dir = os.path.join(args.checkpoint_dir, "vanilla", "checkpoints")
-            if args.pi_opt_dir:
-                pi_opt_dir = args.pi_opt_dir
-            policy_fn, rzsm_state = load_rzsm_policy(
-                ckpt_dir, pi_opt_dir, args.env, device,
-            )
-        else:
-            print(f"  [SKIP] Unknown method: {method}")
-            continue
+        print(f"  Found {len(seed_dirs)} seed(s): "
+              f"{[os.path.basename(os.path.dirname(d)) for d in seed_dirs]}")
 
         for scenario in scenarios:
-            print(f"\n  Scenario: {scenario}  ({args.episodes} episodes)")
+            print(f"\n  Scenario: {scenario}  ({args.episodes} episodes/seed)")
 
-            env = make_scenario_env(args.env, scenario)
-            t0 = time.time()
-            result = evaluate_policy(
-                policy_fn, env, n_episodes=args.episodes,
-                rzsm_state=rzsm_state,
-            )
-            elapsed = time.time() - t0
-            env.close()
+            seed_results = []
 
-            row = {
-                "method": method,
-                "scenario": scenario,
-                "env": args.env,
-                "mean_return": result["mean_return"],
-                "std_return": result["std_return"],
-                "mean_length": result["mean_length"],
-                "episodes": args.episodes,
-                "elapsed_s": round(elapsed, 1),
-            }
+            for si, ckpt_dir in enumerate(seed_dirs):
+                seed_name = os.path.basename(os.path.dirname(ckpt_dir))
 
-            if "recovery_time" in result:
-                row["mean_recovery_steps"] = result["recovery_time"].get(
-                    "mean_recovery_steps", float("nan"))
+                # Load policy for this seed
+                rzsm_state = None
+                if method in ("vanilla", "sa_mdp", "dr"):
+                    policy_fn = load_vanilla_policy(ckpt_dir, args.env, device)
+                elif method == "rarl":
+                    policy_fn = load_rarl_policy(ckpt_dir, args.env, device)
+                elif method == "rzsm":
+                    # Find matching pi_opt seed directory
+                    pi_opt_base = os.path.join(args.checkpoint_dir, "vanilla")
+                    if args.pi_opt_dir:
+                        pi_opt_dir = args.pi_opt_dir
+                    else:
+                        # Try matching seed directory first, fall back to first available
+                        pi_opt_seed = os.path.join(pi_opt_base, seed_name, "checkpoints")
+                        if os.path.isdir(pi_opt_seed):
+                            pi_opt_dir = pi_opt_seed
+                        else:
+                            pi_opt_dirs = discover_seed_dirs(pi_opt_base)
+                            pi_opt_dir = pi_opt_dirs[0] if pi_opt_dirs else \
+                                os.path.join(pi_opt_base, "checkpoints")
+                    policy_fn, rzsm_state = load_rzsm_policy(
+                        ckpt_dir, pi_opt_dir, args.env, device,
+                    )
+                else:
+                    print(f"  [SKIP] Unknown method: {method}")
+                    continue
 
-            if "detection" in result:
-                for k, v in result["detection"].items():
-                    row[f"det_{k}"] = v
+                env = make_scenario_env(args.env, scenario)
+                t0 = time.time()
+                result = evaluate_policy(
+                    policy_fn, env, n_episodes=args.episodes,
+                    rzsm_state=rzsm_state,
+                )
+                elapsed = time.time() - t0
+                env.close()
 
-            all_results.append(row)
+                seed_results.append(result)
 
-            print(f"    J = {result['mean_return']:.1f} +/- {result['std_return']:.1f}  "
-                  f"len = {result['mean_length']:.0f}  ({elapsed:.1f}s)")
+                # Per-seed row for detailed CSV
+                seed_row = {
+                    "method": method,
+                    "scenario": scenario,
+                    "seed": seed_name,
+                    "env": args.env,
+                    "mean_return": result["mean_return"],
+                    "std_return": result["std_return"],
+                    "mean_length": result["mean_length"],
+                    "episodes": args.episodes,
+                    "elapsed_s": round(elapsed, 1),
+                }
+                if "detection" in result:
+                    for k, v in result["detection"].items():
+                        seed_row[f"det_{k}"] = v
+                per_seed_rows.append(seed_row)
 
-            if "detection" in result:
-                d = result["detection"]
-                print(f"    Detector: P={d['precision']:.3f}  R={d['recall']:.3f}  "
-                      f"F1={d['f1']:.3f}")
+                print(f"    {seed_name}: J = {result['mean_return']:.1f} "
+                      f"+/- {result['std_return']:.1f}  "
+                      f"len = {result['mean_length']:.0f}  ({elapsed:.1f}s)")
+
+            # Aggregate across seeds
+            if seed_results:
+                agg = aggregate_seed_results(seed_results)
+
+                row = {
+                    "method": method,
+                    "scenario": scenario,
+                    "env": args.env,
+                    "mean_return": agg["mean_return"],
+                    "std_return": agg["std_return"],
+                    "mean_length": agg["mean_length"],
+                    "n_seeds": agg["n_seeds"],
+                    "episodes": args.episodes,
+                }
+
+                if "recovery_time" in agg:
+                    row["mean_recovery_steps"] = agg["recovery_time"].get(
+                        "mean_recovery_steps", float("nan"))
+
+                if "detection" in agg:
+                    for k, v in agg["detection"].items():
+                        row[f"det_{k}"] = v
+
+                all_results.append(row)
+
+                if agg["n_seeds"] > 1:
+                    print(f"    >> Aggregated ({agg['n_seeds']} seeds): "
+                          f"J = {agg['mean_return']:.1f} +/- {agg['std_return']:.1f}")
 
     # ── Save results ─────────────────────────────────────────────────
-    # Comparison table
-    csv_path = os.path.join(env_out_dir, "comparison_table.csv")
-    if all_results:
-        # Collect all keys across all rows (some have detection fields)
+    def _write_csv(path: str, rows: List[Dict]) -> None:
+        if not rows:
+            return
         all_keys: list[str] = []
         seen: set[str] = set()
-        for r in all_results:
+        for r in rows:
             for k in r.keys():
                 if k not in seen:
                     all_keys.append(k)
                     seen.add(k)
-        with open(csv_path, "w", newline="") as f:
+        with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
             w.writeheader()
-            w.writerows(all_results)
-        print(f"\nSaved: {csv_path}")
+            w.writerows(rows)
+        print(f"Saved: {path}")
 
-    # Per-episode returns
-    per_ep_path = os.path.join(env_out_dir, "per_episode.csv")
-    with open(per_ep_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["method", "scenario", "episode", "return", "length"])
-        for row in all_results:
-            # Reconstruct per-episode from the raw result
-            method, scenario = row["method"], row["scenario"]
-            env = make_scenario_env(args.env, scenario)
-            # We already ran eval — just write from cached results
-            # (per_episode data was in result but not persisted; write summary)
+    # Aggregated comparison table (main results)
+    _write_csv(os.path.join(env_out_dir, "comparison_table.csv"), all_results)
+
+    # Per-seed detailed results
+    _write_csv(os.path.join(env_out_dir, "per_seed_results.csv"), per_seed_rows)
 
     # Detection metrics JSON
     det_results = {r["method"]: {k: v for k, v in r.items() if k.startswith("det_")}
@@ -483,16 +578,17 @@ def run_evaluation(args) -> None:
     # ── Print summary table ──────────────────────────────────────────
     if all_results:
         print(f"\n{'='*70}")
-        print(f"  RESULTS: {args.env}")
+        print(f"  RESULTS: {args.env}  (aggregated across seeds)")
         print(f"{'='*70}")
-        print(f"{'Method':<12} {'Scenario':<12} {'Return':>12} {'Length':>8}")
-        print("-" * 50)
+        print(f"{'Method':<12} {'Scenario':<12} {'Return':>12} {'Length':>8} {'Seeds':>6}")
+        print("-" * 56)
         for r in all_results:
             print(f"{r['method']:<12} {r['scenario']:<12} "
                   f"{r['mean_return']:>8.1f}±{r['std_return']:<4.1f}"
-                  f"{r['mean_length']:>8.0f}")
+                  f"{r['mean_length']:>8.0f}"
+                  f"{r['n_seeds']:>6}")
 
-    # ── Compute robustness ratios ────────────────────────────────────
+    # ── Robustness ratios ────────────────────────────────────────────
     nominal_returns = {r["method"]: r["mean_return"]
                        for r in all_results if r["scenario"] == "nominal"}
     if nominal_returns:
@@ -518,7 +614,7 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=str, default="logs/",
                     help="Root dir containing method subdirectories")
     p.add_argument("--episodes", type=int, default=50,
-                    help="Evaluation episodes per (method, scenario)")
+                    help="Evaluation episodes per (method, scenario, seed)")
     p.add_argument("--output", type=str, default="results/",
                     help="Output directory for results")
     p.add_argument("--device", type=str, default="auto")

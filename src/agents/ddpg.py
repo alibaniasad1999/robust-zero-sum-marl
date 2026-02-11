@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import os
 import time
+from collections import defaultdict
 from copy import deepcopy
 from typing import Any, Dict, Optional, Tuple
 
@@ -44,6 +45,15 @@ def _make_vec_env(env_fn, num_envs: int):
     if num_envs > 1:
         return gym.vector.AsyncVectorEnv([env_fn for _ in range(num_envs)])
     return gym.vector.SyncVectorEnv([env_fn])
+
+
+def _grad_norm(module: nn.Module) -> float:
+    """Compute total L2 gradient norm for a module's parameters."""
+    total = 0.0
+    for p in module.parameters():
+        if p.grad is not None:
+            total += p.grad.data.norm(2).item() ** 2
+    return total ** 0.5
 
 
 # ======================================================================
@@ -144,7 +154,7 @@ class DDPGAgent:
         return np.clip(a, -self.act_limit, self.act_limit)
 
     # ------------------------------------------------------------------
-    def _update(self, batch: ReplayBatch) -> None:
+    def _update(self, batch: ReplayBatch) -> Dict[str, float]:
         o, a, r = batch.obs, batch.act, batch.rew.squeeze(-1)
         o2 = batch.next_obs
         d = batch.done.float().squeeze(-1)
@@ -159,6 +169,7 @@ class DDPGAgent:
 
         self.q_optim.zero_grad()
         loss_q.backward()
+        grad_q = _grad_norm(self.q)
         self.q_optim.step()
 
         # Actor
@@ -167,6 +178,7 @@ class DDPGAgent:
         loss_pi = -self.q(o, self.pi(o)).mean()
         self.pi_optim.zero_grad()
         loss_pi.backward()
+        grad_pi = _grad_norm(self.pi)
         self.pi_optim.step()
         for p in self.q.parameters():
             p.requires_grad = True
@@ -178,6 +190,14 @@ class DDPGAgent:
             for p, pt in zip(self.q.parameters(), self.q_targ.parameters()):
                 pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
 
+        return {
+            "loss_q": loss_q.item(),
+            "loss_pi": loss_pi.item(),
+            "q_val": q_val.mean().item(),
+            "grad_q": grad_q,
+            "grad_pi": grad_pi,
+        }
+
     # ------------------------------------------------------------------
     def train(self, epochs: Optional[int] = None) -> None:
         epochs = epochs or self.epochs
@@ -187,6 +207,16 @@ class DDPGAgent:
             with open(self._csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(["step", "episode_return"])
 
+        # Metrics CSV
+        metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
+        if not os.path.isfile(metrics_csv):
+            with open(metrics_csv, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "epoch", "step", "loss_q", "loss_pi", "q_val",
+                    "grad_q", "grad_pi", "mean_return", "mean_length",
+                    "episodes", "buffer_size", "elapsed_s",
+                ])
+
         # Each loop iteration collects N transitions
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
@@ -195,6 +225,11 @@ class DDPGAgent:
         ep_rets = np.zeros(N)
         ep_lens = np.zeros(N, dtype=int)
         t0 = time.time()
+
+        # Epoch-level metric accumulators
+        epoch_metrics: Dict[str, list] = defaultdict(list)
+        epoch_returns: list[float] = []
+        epoch_lengths: list[int] = []
 
         for t in range(total_steps):
             global_step = t * N
@@ -230,8 +265,8 @@ class DDPGAgent:
                 if dones[i]:
                     with open(self._csv_path, "a", newline="") as f:
                         csv.writer(f).writerow([global_step, ep_rets[i]])
-                    print(f"  step={global_step}  ret={ep_rets[i]:.1f}  "
-                          f"len={ep_lens[i]}")
+                    epoch_returns.append(ep_rets[i])
+                    epoch_lengths.append(ep_lens[i])
                     ep_rets[i] = 0.0
                     ep_lens[i] = 0
 
@@ -241,14 +276,55 @@ class DDPGAgent:
             if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
                     batch = self.buffer.sample(self.batch_size)
-                    self._update(batch)
+                    m = self._update(batch)
+                    for k, v in m.items():
+                        epoch_metrics[k].append(v)
 
             # Epoch boundary
             if (global_step + N) % self.steps_per_epoch < N:
                 epoch = (global_step + N) // self.steps_per_epoch
                 if epoch > 0:
-                    print(f"[DDPGAgent] Epoch {epoch}/{epochs}  "
-                          f"elapsed={time.time()-t0:.0f}s")
+                    elapsed = time.time() - t0
+                    mean_ret = np.mean(epoch_returns) if epoch_returns else float("nan")
+                    mean_len = np.mean(epoch_lengths) if epoch_lengths else float("nan")
+
+                    # Compute epoch-averaged metrics
+                    avg = {k: np.mean(v) for k, v in epoch_metrics.items() if v}
+
+                    print(f"\n[DDPGAgent] Epoch {epoch}/{epochs}  "
+                          f"elapsed={elapsed:.0f}s  "
+                          f"buf={len(self.buffer)}")
+                    print(f"  return   {mean_ret:>8.1f}  "
+                          f"(episodes={len(epoch_returns)}  "
+                          f"mean_len={mean_len:.0f})")
+                    if avg:
+                        print(f"  loss_q   {avg.get('loss_q', 0):>10.4f}   "
+                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}   "
+                              f"Q_val  {avg.get('q_val', 0):>8.2f}")
+                        print(f"  grad_q   {avg.get('grad_q', 0):>10.4f}   "
+                              f"grad_pi  {avg.get('grad_pi', 0):>10.4f}")
+
+                    # Log to metrics CSV
+                    with open(metrics_csv, "a", newline="") as f:
+                        csv.writer(f).writerow([
+                            epoch, global_step,
+                            f"{avg.get('loss_q', ''):.6f}" if avg else "",
+                            f"{avg.get('loss_pi', ''):.6f}" if avg else "",
+                            f"{avg.get('q_val', ''):.4f}" if avg else "",
+                            f"{avg.get('grad_q', ''):.4f}" if avg else "",
+                            f"{avg.get('grad_pi', ''):.4f}" if avg else "",
+                            f"{mean_ret:.2f}" if not np.isnan(mean_ret) else "",
+                            f"{mean_len:.1f}" if not np.isnan(mean_len) else "",
+                            len(epoch_returns),
+                            len(self.buffer),
+                            f"{elapsed:.1f}",
+                        ])
+
+                    # Reset epoch accumulators
+                    epoch_metrics = defaultdict(list)
+                    epoch_returns = []
+                    epoch_lengths = []
+
                     if epoch % self.save_freq == 0:
                         self.save()
 
@@ -451,7 +527,7 @@ class AdversarialDDPGAgent:
         return np.clip(a, -self.act_limit, self.act_limit)
 
     # ------------------------------------------------------------------
-    def _update(self, batch: ReplayBatch) -> None:
+    def _update(self, batch: ReplayBatch) -> Dict[str, float]:
         o = batch.obs
         o2 = batch.next_obs
         r = batch.rew.squeeze(-1)
@@ -470,6 +546,7 @@ class AdversarialDDPGAgent:
 
         self.q_optim.zero_grad()
         loss_q.backward()
+        grad_q = _grad_norm(self.q)
         self.q_optim.step()
 
         # ---- actor + adversary (gradient flip) ----
@@ -484,6 +561,9 @@ class AdversarialDDPGAgent:
         self.pi_rob_optim.zero_grad()
         self.pi_adv_optim.zero_grad()
         loss_pi.backward()
+
+        grad_pi_rob = _grad_norm(self.pi_rob)
+        grad_pi_adv = _grad_norm(self.pi_adv)
 
         for p in self.pi_adv.parameters():
             if p.grad is not None:
@@ -503,6 +583,15 @@ class AdversarialDDPGAgent:
                 pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
             for p, pt in zip(self.q.parameters(), self.q_targ.parameters()):
                 pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+
+        return {
+            "loss_q": loss_q.item(),
+            "loss_pi": loss_pi.item(),
+            "q_val": q_val.mean().item(),
+            "grad_q": grad_q,
+            "grad_pi_rob": grad_pi_rob,
+            "grad_pi_adv": grad_pi_adv,
+        }
 
     # ------------------------------------------------------------------
     def _collect_detector_data(
@@ -537,6 +626,20 @@ class AdversarialDDPGAgent:
             with open(self._csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(["step", "episode_return", "has_disturbance"])
 
+        # Metrics CSV
+        metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
+        metrics_header = [
+            "epoch", "step", "loss_q", "loss_pi", "q_val",
+            "grad_q", "grad_pi_rob", "grad_pi_adv",
+            "mean_return", "mean_length", "episodes",
+            "dist_episodes", "buffer_size", "elapsed_s",
+        ]
+        if self.use_transformer:
+            metrics_header += ["det_loss", "det_dist_loss", "det_alpha_loss"]
+        if not os.path.isfile(metrics_csv):
+            with open(metrics_csv, "w", newline="") as f:
+                csv.writer(f).writerow(metrics_header)
+
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
 
@@ -553,6 +656,13 @@ class AdversarialDDPGAgent:
         next_episode_id = N
 
         t0 = time.time()
+
+        # Epoch-level metric accumulators
+        epoch_metrics: Dict[str, list] = defaultdict(list)
+        epoch_det_metrics: Dict[str, list] = defaultdict(list)
+        epoch_returns: list[float] = []
+        epoch_lengths: list[int] = []
+        epoch_dist_eps: int = 0
 
         for t in range(total_steps):
             global_step = t * N
@@ -606,8 +716,10 @@ class AdversarialDDPGAgent:
                     with open(self._csv_path, "a", newline="") as f:
                         csv.writer(f).writerow([global_step, ep_rets[i],
                                                 int(has_dist[i])])
-                    print(f"  step={global_step}  ret={ep_rets[i]:.1f}  "
-                          f"len={ep_lens[i]}  dist={has_dist[i]}")
+                    epoch_returns.append(ep_rets[i])
+                    epoch_lengths.append(ep_lens[i])
+                    if has_dist[i]:
+                        epoch_dist_eps += 1
                     self.dataset_logger.end_episode()
 
                     # Collect transformer data from this env's episode
@@ -633,19 +745,80 @@ class AdversarialDDPGAgent:
             if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
                     batch = self.buffer.sample(self.batch_size)
-                    self._update(batch)
+                    m = self._update(batch)
+                    for k, v in m.items():
+                        epoch_metrics[k].append(v)
 
                 # train transformer periodically
                 if self.use_transformer and global_step % self.transformer_train_interval < N:
                     for _ in range(50):
-                        self._train_detector(batch_size=64)
+                        det_m = self._train_detector(batch_size=64)
+                        if det_m:
+                            for k, v in det_m.items():
+                                epoch_det_metrics[k].append(v)
 
             # --- epoch boundary ---
             if (global_step + N) % self.steps_per_epoch < N:
                 epoch = (global_step + N) // self.steps_per_epoch
                 if epoch > 0:
-                    print(f"[AdversarialDDPG] Epoch {epoch}/{epochs}  "
-                          f"elapsed={time.time()-t0:.0f}s")
+                    elapsed = time.time() - t0
+                    mean_ret = np.mean(epoch_returns) if epoch_returns else float("nan")
+                    mean_len = np.mean(epoch_lengths) if epoch_lengths else float("nan")
+
+                    avg = {k: np.mean(v) for k, v in epoch_metrics.items() if v}
+                    avg_det = {k: np.mean(v) for k, v in epoch_det_metrics.items() if v}
+
+                    print(f"\n[AdversarialDDPG] Epoch {epoch}/{epochs}  "
+                          f"elapsed={elapsed:.0f}s  "
+                          f"buf={len(self.buffer)}")
+                    print(f"  return   {mean_ret:>8.1f}  "
+                          f"(episodes={len(epoch_returns)}  "
+                          f"dist={epoch_dist_eps}  "
+                          f"mean_len={mean_len:.0f})")
+                    if avg:
+                        print(f"  loss_q   {avg.get('loss_q', 0):>10.4f}   "
+                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}   "
+                              f"Q_val  {avg.get('q_val', 0):>8.2f}")
+                        print(f"  grad_q   {avg.get('grad_q', 0):>10.4f}   "
+                              f"grad_rob {avg.get('grad_pi_rob', 0):>10.4f}   "
+                              f"grad_adv {avg.get('grad_pi_adv', 0):>8.4f}")
+                    if avg_det:
+                        print(f"  det_loss {avg_det.get('total_loss', 0):>10.6f}   "
+                              f"det_dist {avg_det.get('loss_disturbance', 0):>10.6f}   "
+                              f"det_blend {avg_det.get('loss_blending', 0):>8.6f}")
+
+                    # Log to metrics CSV
+                    row = [
+                        epoch, global_step,
+                        f"{avg.get('loss_q', ''):.6f}" if avg else "",
+                        f"{avg.get('loss_pi', ''):.6f}" if avg else "",
+                        f"{avg.get('q_val', ''):.4f}" if avg else "",
+                        f"{avg.get('grad_q', ''):.4f}" if avg else "",
+                        f"{avg.get('grad_pi_rob', ''):.4f}" if avg else "",
+                        f"{avg.get('grad_pi_adv', ''):.4f}" if avg else "",
+                        f"{mean_ret:.2f}" if not np.isnan(mean_ret) else "",
+                        f"{mean_len:.1f}" if not np.isnan(mean_len) else "",
+                        len(epoch_returns),
+                        epoch_dist_eps,
+                        len(self.buffer),
+                        f"{elapsed:.1f}",
+                    ]
+                    if self.use_transformer:
+                        row += [
+                            f"{avg_det.get('total_loss', ''):.6f}" if avg_det else "",
+                            f"{avg_det.get('loss_disturbance', ''):.6f}" if avg_det else "",
+                            f"{avg_det.get('loss_blending', ''):.6f}" if avg_det else "",
+                        ]
+                    with open(metrics_csv, "a", newline="") as f:
+                        csv.writer(f).writerow(row)
+
+                    # Reset epoch accumulators
+                    epoch_metrics = defaultdict(list)
+                    epoch_det_metrics = defaultdict(list)
+                    epoch_returns = []
+                    epoch_lengths = []
+                    epoch_dist_eps = 0
+
                     if epoch % self.save_freq == 0:
                         self.save()
 

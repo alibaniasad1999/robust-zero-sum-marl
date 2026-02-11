@@ -2,11 +2,15 @@
 """
 Generate publication-quality figures from evaluation results.
 
-Produces IEEE-style plots matching top robust RL papers:
+Supports multi-seed results: std_return in comparison_table.csv represents
+cross-seed variation. Training curves overlay all seeds with mean +/- std bands.
+
+Produces IEEE-style plots:
     - Fig 1: Grouped bar chart (return under disturbances)
     - Fig 2: Robustness ratio heatmap
     - Fig 3: Survival (episode length) comparison
-    - Fig 4: Training curves
+    - Fig 4: Training curves (multi-seed with confidence bands)
+    - Fig 5: Performance drop from nominal
     - Table 1: Main comparison (LaTeX)
     - Table 2: Robustness ratio (LaTeX)
 
@@ -94,6 +98,30 @@ def load_data():
     return df
 
 
+def _discover_seed_csvs(method: str) -> list[str]:
+    """Find all training_returns.csv files across seed directories."""
+    method_dir = os.path.join(LOG_DIR, method)
+    csvs = []
+
+    if not os.path.isdir(method_dir):
+        return csvs
+
+    # Multi-seed layout: logs/method/seed_*/training_returns.csv
+    for name in sorted(os.listdir(method_dir)):
+        if name.startswith("seed_"):
+            csv_file = os.path.join(method_dir, name, "training_returns.csv")
+            if os.path.isfile(csv_file):
+                csvs.append(csv_file)
+
+    # Fallback: legacy single-seed layout
+    if not csvs:
+        legacy = os.path.join(method_dir, "training_returns.csv")
+        if os.path.isfile(legacy):
+            csvs.append(legacy)
+
+    return csvs
+
+
 def fig1_grouped_bar(df):
     """Fig 1: Grouped bar chart — mean return per method per scenario."""
     fig, ax = plt.subplots(figsize=(7, 3.2))
@@ -126,7 +154,13 @@ def fig1_grouped_bar(df):
     ax.set_xticks(x)
     ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIOS])
     ax.set_ylabel("Mean Episode Return")
-    ax.set_title("Ant-v5: Performance Under Disturbance Scenarios")
+
+    n_seeds = df["n_seeds"].iloc[0] if "n_seeds" in df.columns else 1
+    title = f"Ant-v5: Performance Under Disturbance Scenarios"
+    if n_seeds > 1:
+        title += f" ({n_seeds} seeds)"
+    ax.set_title(title)
+
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.18),
@@ -190,7 +224,7 @@ def fig2_robustness_heatmap(df):
 
 
 def fig3_episode_length(df):
-    """Fig 3: Episode length (survival) comparison — radar/spider chart."""
+    """Fig 3: Episode length (survival) comparison."""
     fig, ax = plt.subplots(figsize=(5, 3))
 
     n_scenarios = len(SCENARIOS)
@@ -234,36 +268,76 @@ def fig3_episode_length(df):
 
 
 def fig4_training_curves():
-    """Fig 4: Training curves from CSV logs (all methods overlaid)."""
+    """Fig 4: Training curves with multi-seed mean +/- std bands."""
     fig, ax = plt.subplots(figsize=(5.5, 3))
 
     for method in METHODS:
-        csv_file = os.path.join(LOG_DIR, method, "training_returns.csv")
-        if not os.path.isfile(csv_file):
+        seed_csvs = _discover_seed_csvs(method)
+        if not seed_csvs:
             continue
-        data = pd.read_csv(csv_file)
-        col = data.columns[1]  # episode_return
-        smoothed = data[col].rolling(window=5, min_periods=1).mean()
+
+        # Load all seeds
+        all_returns = []
+        common_steps = None
+
+        for csv_file in seed_csvs:
+            data = pd.read_csv(csv_file)
+            steps_col = data.columns[0]
+            ret_col = data.columns[1]
+            steps = data[steps_col].values
+            returns = data[ret_col].values
+
+            all_returns.append(returns)
+            if common_steps is None:
+                common_steps = steps
+
+        if common_steps is None:
+            continue
+
+        # Truncate to shortest seed length
+        min_len = min(len(r) for r in all_returns)
+        common_steps = common_steps[:min_len]
+        all_returns = np.array([r[:min_len] for r in all_returns])
+
+        # Compute cross-seed statistics
+        mean_ret = np.mean(all_returns, axis=0)
+        std_ret = np.std(all_returns, axis=0)
+
+        # Smooth for readability
+        window = min(5, max(1, min_len // 10))
+        mean_smooth = pd.Series(mean_ret).rolling(window=window, min_periods=1).mean().values
+        std_smooth = pd.Series(std_ret).rolling(window=window, min_periods=1).mean().values
+
+        label = METHOD_LABELS[method]
+        if len(seed_csvs) > 1:
+            label += f" ({len(seed_csvs)} seeds)"
+
         ax.plot(
-            data.iloc[:, 0], smoothed,
-            label=METHOD_LABELS[method],
+            common_steps, mean_smooth,
+            label=label,
             color=COLORS[method],
             linewidth=1.0,
             alpha=0.9,
         )
-        # Light confidence band
-        std_smooth = data[col].rolling(window=5, min_periods=1).std().fillna(0)
+
+        # Confidence band: mean +/- std across seeds
         ax.fill_between(
-            data.iloc[:, 0],
-            smoothed - std_smooth,
-            smoothed + std_smooth,
+            common_steps,
+            mean_smooth - std_smooth,
+            mean_smooth + std_smooth,
             color=COLORS[method],
-            alpha=0.12,
+            alpha=0.15,
         )
+
+    n_seeds = max(len(_discover_seed_csvs(m)) for m in METHODS
+                  if _discover_seed_csvs(m))
+    title = "Training Curves — Ant-v5"
+    if n_seeds > 1:
+        title += f" (mean ± std, {n_seeds} seeds)"
 
     ax.set_xlabel("Environment Steps")
     ax.set_ylabel("Episode Return")
-    ax.set_title("Training Curves — Ant-v5 (1 Epoch)")
+    ax.set_title(title)
     ax.legend(loc="best", frameon=True, framealpha=0.9)
 
     plt.tight_layout()
@@ -315,13 +389,17 @@ def fig5_performance_drop(df):
 
 def table_latex(df):
     """Generate LaTeX tables for the paper."""
+    n_seeds = int(df["n_seeds"].iloc[0]) if "n_seeds" in df.columns else 1
+    seed_note = f" across {n_seeds} seeds" if n_seeds > 1 else ""
+
     # ── Table 1: Main comparison ──
     print("\n" + "=" * 70)
     print("  TABLE 1: Performance Comparison (paste into paper.tex)")
     print("=" * 70)
 
     print(r"\begin{table}[!t]")
-    print(r"\caption{Mean episode return ($\pm$ std) across disturbance scenarios on Ant-v5.}")
+    print(r"\caption{Mean episode return ($\pm$ std" + seed_note +
+          r") across disturbance scenarios on Ant-v5.}")
     print(r"\label{tab:results}")
     print(r"\centering")
     print(r"\footnotesize")
@@ -383,7 +461,6 @@ def table_latex(df):
             cell = df[(df["method"] == method) & (df["scenario"] == scenario)]
             if len(cell) > 0 and method in nominal.index and nominal[method] != 0:
                 ratio = cell["mean_return"].values[0] / nominal[method]
-                # Bold the best ratio per column (closest to 1.0)
                 row_str += f" & {ratio:.2f}"
             else:
                 row_str += " & --"
@@ -402,8 +479,10 @@ def main():
 
     print("Loading results...")
     df = load_data()
+    n_seeds = int(df["n_seeds"].iloc[0]) if "n_seeds" in df.columns else 1
     print(f"  {len(df)} rows: {df['method'].nunique()} methods x "
-          f"{df['scenario'].nunique()} scenarios\n")
+          f"{df['scenario'].nunique()} scenarios"
+          f" ({n_seeds} seed{'s' if n_seeds > 1 else ''})\n")
 
     fig1_grouped_bar(df)
     fig2_robustness_heatmap(df)
