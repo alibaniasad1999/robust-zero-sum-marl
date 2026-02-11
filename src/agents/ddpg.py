@@ -5,6 +5,8 @@ DDPG agents for the zero-sum robust RL framework.
     AdversarialDDPGAgent  — trains pi_rob + pi_adv in a zero-sum Markov game,
                             with optional transformer-based disturbance detection
                             and policy mixing
+
+Both agents support vectorized environments via ``num_envs`` (default 1).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import time
 from copy import deepcopy
 from typing import Any, Dict, Optional, Tuple
 
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -34,6 +37,13 @@ from src.detector.transformer import (
     DisturbanceDetectorTrainer,
     AdaptiveControllerBlender,
 )
+
+
+def _make_vec_env(env_fn, num_envs: int):
+    """Create a vectorized env from an env factory function."""
+    if num_envs > 1:
+        return gym.vector.AsyncVectorEnv([env_fn for _ in range(num_envs)])
+    return gym.vector.SyncVectorEnv([env_fn])
 
 
 # ======================================================================
@@ -64,6 +74,7 @@ class DDPGAgent:
         save_freq: int = 10,
         device: str = "auto",
         log_dir: str = "logs/nominal",
+        num_envs: int = 1,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -73,10 +84,13 @@ class DDPGAgent:
         else:
             self.device = torch.device(device)
 
-        self.env = env_fn()
-        obs_dim = self.env.observation_space.shape[0]
-        act_dim = self.env.action_space.shape[0]
-        self.act_limit = float(self.env.action_space.high[0])
+        # Vectorized environment
+        self.num_envs = num_envs
+        self.envs = _make_vec_env(env_fn, num_envs)
+
+        obs_dim = self.envs.single_observation_space.shape[0]
+        act_dim = self.envs.single_action_space.shape[0]
+        self.act_limit = float(self.envs.single_action_space.high[0])
 
         # Networks
         self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
@@ -90,13 +104,14 @@ class DDPGAgent:
         self.pi_optim = Adam(self.pi.parameters(), lr=pi_lr)
         self.q_optim = Adam(self.q.parameters(), lr=q_lr)
 
-        # Replay buffer (new-style from src.utils.buffers)
+        # Replay buffer
         self.buffer = ReplayBuffer(
             capacity=replay_size,
             obs_dim=obs_dim,
             total_act=act_dim,
             device=self.device,
             dtype=np.float32,
+            env_num=num_envs if num_envs > 1 else None,
         )
 
         # Hyperparams
@@ -116,12 +131,13 @@ class DDPGAgent:
         os.makedirs(log_dir, exist_ok=True)
         self._csv_path = os.path.join(log_dir, "training_returns.csv")
 
-        print(f"[DDPGAgent] device={self.device}  "
+        print(f"[DDPGAgent] device={self.device}  num_envs={num_envs}  "
               f"pi_params={count_vars(self.pi)}  q_params={count_vars(self.q)}")
 
     # ------------------------------------------------------------------
     @torch.no_grad()
     def _get_action(self, obs: np.ndarray, noise: float) -> np.ndarray:
+        """Get action for obs of shape (N, obs_dim) or (obs_dim,)."""
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         a = self.pi(obs_t).cpu().numpy()
         a += noise * np.random.randn(*a.shape)
@@ -165,45 +181,76 @@ class DDPGAgent:
     # ------------------------------------------------------------------
     def train(self, epochs: Optional[int] = None) -> None:
         epochs = epochs or self.epochs
+        N = self.num_envs
+
         if not os.path.isfile(self._csv_path):
             with open(self._csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(["step", "episode_return"])
 
-        total_steps = self.steps_per_epoch * epochs
-        obs, _ = self.env.reset()
-        ep_ret, ep_len = 0.0, 0
+        # Each loop iteration collects N transitions
+        total_transitions = self.steps_per_epoch * epochs
+        total_steps = total_transitions // N
+
+        obs, _ = self.envs.reset()  # (N, obs_dim)
+        ep_rets = np.zeros(N)
+        ep_lens = np.zeros(N, dtype=int)
         t0 = time.time()
 
         for t in range(total_steps):
-            if t < self.start_steps:
-                act = self.env.action_space.sample()
+            global_step = t * N
+
+            # Action selection
+            if global_step < self.start_steps:
+                acts = np.stack([self.envs.single_action_space.sample()
+                                 for _ in range(N)])
             else:
-                act = self._get_action(obs, self.act_noise)
+                acts = self._get_action(obs, self.act_noise)
 
-            next_obs, reward, terminated, truncated, _ = self.env.step(act)
-            self.buffer.add(obs, next_obs, act, reward, terminated, truncated)
-            obs = next_obs
-            ep_ret += reward
-            ep_len += 1
+            next_obs, rews, terms, truncs, infos = self.envs.step(acts)
 
-            if terminated or truncated or ep_len >= self.max_ep_len:
-                with open(self._csv_path, "a", newline="") as f:
-                    csv.writer(f).writerow([t, ep_ret])
-                print(f"  step={t+1}  ret={ep_ret:.1f}  len={ep_len}")
-                obs, _ = self.env.reset()
-                ep_ret, ep_len = 0.0, 0
+            # Use final_observation for terminal transitions (auto-reset)
+            real_next_obs = next_obs.copy()
+            if "final_observation" in infos:
+                for i in range(N):
+                    if infos["_final_observation"][i]:
+                        real_next_obs[i] = infos["final_observation"][i]
 
-            if t >= self.update_after and t % self.update_every == 0:
+            self.buffer.add_batch(
+                obs, real_next_obs, acts,
+                rews.reshape(-1, 1),
+                terms.reshape(-1, 1),
+                truncs.reshape(-1, 1),
+            )
+
+            # Per-env episode tracking
+            ep_rets += rews
+            ep_lens += 1
+            dones = terms | truncs
+            for i in range(N):
+                if dones[i]:
+                    with open(self._csv_path, "a", newline="") as f:
+                        csv.writer(f).writerow([global_step, ep_rets[i]])
+                    print(f"  step={global_step}  ret={ep_rets[i]:.1f}  "
+                          f"len={ep_lens[i]}")
+                    ep_rets[i] = 0.0
+                    ep_lens[i] = 0
+
+            obs = next_obs  # auto-reset already applied by VectorEnv
+
+            # Network updates
+            if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
                     batch = self.buffer.sample(self.batch_size)
                     self._update(batch)
 
-            if (t + 1) % self.steps_per_epoch == 0:
-                epoch = (t + 1) // self.steps_per_epoch
-                print(f"[DDPGAgent] Epoch {epoch}/{epochs}  "
-                      f"elapsed={time.time()-t0:.0f}s")
-                if epoch % self.save_freq == 0:
-                    self.save()
+            # Epoch boundary
+            if (global_step + N) % self.steps_per_epoch < N:
+                epoch = (global_step + N) // self.steps_per_epoch
+                if epoch > 0:
+                    print(f"[DDPGAgent] Epoch {epoch}/{epochs}  "
+                          f"elapsed={time.time()-t0:.0f}s")
+                    if epoch % self.save_freq == 0:
+                        self.save()
 
     # ------------------------------------------------------------------
     def save(self, path: Optional[str] = None) -> None:
@@ -271,6 +318,7 @@ class AdversarialDDPGAgent:
         transformer_train_interval: int = 500,
         # pre-trained optimal policy (for blending)
         pi_opt_path: Optional[str] = None,
+        num_envs: int = 1,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -280,18 +328,18 @@ class AdversarialDDPGAgent:
         else:
             self.device = torch.device(device)
 
-        self.env = env_fn()
-        obs_dim = self.env.observation_space.shape[0]
-        act_dim = self.env.action_space.shape[0]
-        self.act_limit = float(self.env.action_space.high[0])
+        # Vectorized environment
+        self.num_envs = num_envs
+        self.envs = _make_vec_env(env_fn, num_envs)
+
+        obs_dim = self.envs.single_observation_space.shape[0]
+        act_dim = self.envs.single_action_space.shape[0]
+        self.act_limit = float(self.envs.single_action_space.high[0])
         self.dist_limit = self.act_limit * disturbance_ratio
 
         # ---- networks ----
-        # robust controller
         self.pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
-        # adversary (bounded output)
         self.pi_adv = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.dist_limit).to(self.device)
-        # centralized Q(s, a_ctrl, a_dist)
         self.q = AdversarialMLPQFunction(obs_dim, act_dim, act_dim, hidden_sizes, activation).to(self.device)
 
         # targets
@@ -303,7 +351,7 @@ class AdversarialDDPGAgent:
                   + list(self.q_targ.parameters())):
             p.requires_grad = False
 
-        # optional optimal policy (loaded separately)
+        # optional optimal policy
         self.pi_opt: Optional[MLPActor] = None
         if pi_opt_path is not None:
             self.pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
@@ -321,13 +369,13 @@ class AdversarialDDPGAgent:
         self.q_optim = Adam(self.q.parameters(), lr=q_lr)
 
         # ---- replay buffer ----
-        # total_act = act_dim (ctrl) + act_dim (dist)
         self.buffer = ReplayBuffer(
             capacity=replay_size,
             obs_dim=obs_dim,
             total_act=act_dim * 2,
             device=self.device,
             dtype=np.float32,
+            env_num=num_envs if num_envs > 1 else None,
         )
 
         # ---- hyperparams ----
@@ -374,7 +422,7 @@ class AdversarialDDPGAgent:
             )
             self._transformer_data: list[dict] = []
 
-        print(f"[AdversarialDDPG] device={self.device}  "
+        print(f"[AdversarialDDPG] device={self.device}  num_envs={num_envs}  "
               f"pi_rob={count_vars(self.pi_rob)}  pi_adv={count_vars(self.pi_adv)}  "
               f"q={count_vars(self.q)}")
 
@@ -408,7 +456,6 @@ class AdversarialDDPGAgent:
         o2 = batch.next_obs
         r = batch.rew.squeeze(-1)
         d = batch.done.float().squeeze(-1)
-        # split stored action into ctrl and dist halves
         a_ctrl = batch.act[:, : self.act_dim]
         a_dist = batch.act[:, self.act_dim :]
 
@@ -425,22 +472,19 @@ class AdversarialDDPGAgent:
         loss_q.backward()
         self.q_optim.step()
 
-        # ---- actor + adversary (simultaneous, gradient flip) ----
+        # ---- actor + adversary (gradient flip) ----
         for p in self.q.parameters():
             p.requires_grad = False
 
-        # compute Q with current policies
         a_rob = self.pi_rob(o)
         a_adv = self.pi_adv(o)
         q_for_actors = self.q(o, a_rob, a_adv)
 
-        # controller maximises Q  ->  loss = -Q
         loss_pi = -q_for_actors.mean()
         self.pi_rob_optim.zero_grad()
         self.pi_adv_optim.zero_grad()
         loss_pi.backward()
 
-        # flip adversary gradients so it *minimises* Q
         for p in self.pi_adv.parameters():
             if p.grad is not None:
                 p.grad.mul_(-1.0)
@@ -487,109 +531,123 @@ class AdversarialDDPGAgent:
     # ------------------------------------------------------------------
     def train(self, epochs: Optional[int] = None) -> None:
         epochs = epochs or self.epochs
+        N = self.num_envs
 
         if not os.path.isfile(self._csv_path):
             with open(self._csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(["step", "episode_return", "has_disturbance"])
 
-        total_steps = self.steps_per_epoch * epochs
-        obs, _ = self.env.reset()
-        ep_ret, ep_len = 0.0, 0
-        has_dist = np.random.rand() < self.disturbance_probability
-        ep_obs_history: list[np.ndarray] = []
-        episode_id = 0
+        total_transitions = self.steps_per_epoch * epochs
+        total_steps = total_transitions // N
+
+        obs, _ = self.envs.reset()  # (N, obs_dim)
+        ep_rets = np.zeros(N)
+        ep_lens = np.zeros(N, dtype=int)
+
+        # Per-env disturbance flags
+        has_dist = np.random.rand(N) < self.disturbance_probability
+
+        # Per-env obs history for transformer data collection
+        ep_obs_histories: list[list[np.ndarray]] = [[] for _ in range(N)]
+        episode_ids = np.arange(N, dtype=int)
+        next_episode_id = N
+
         t0 = time.time()
 
         for t in range(total_steps):
-            ep_obs_history.append(obs.copy())
+            global_step = t * N
+
+            # Store obs in per-env histories
+            for i in range(N):
+                ep_obs_histories[i].append(obs[i].copy())
 
             # --- action selection ---
-            if t < self.start_steps:
-                act_ctrl = self.env.action_space.sample()
-                act_dist = (
-                    self.env.action_space.sample() * self.disturbance_ratio
-                    if has_dist
-                    else np.zeros(self.act_dim, dtype=np.float32)
-                )
+            if global_step < self.start_steps:
+                acts_ctrl = np.stack([self.envs.single_action_space.sample()
+                                      for _ in range(N)])
+                acts_dist = np.zeros_like(acts_ctrl)
+                for i in range(N):
+                    if has_dist[i]:
+                        acts_dist[i] = (self.envs.single_action_space.sample()
+                                        * self.disturbance_ratio)
             else:
-                act_ctrl = self._get_ctrl_action(obs, self.act_noise)
-                act_dist = (
-                    self._get_adv_action(obs, self.act_noise)
-                    if has_dist
-                    else np.zeros(self.act_dim, dtype=np.float32)
-                )
+                acts_ctrl = self._get_ctrl_action(obs, self.act_noise)
+                acts_adv = self._get_adv_action(obs, self.act_noise)
+                acts_dist = np.where(
+                    has_dist[:, None], acts_adv,
+                    np.zeros(self.act_dim, dtype=np.float32))
 
-            act_total = act_ctrl + act_dist
-            next_obs, reward, terminated, truncated, info = self.env.step(act_total)
+            acts_total = acts_ctrl + acts_dist
+            next_obs, rews, terms, truncs, infos = self.envs.step(acts_total)
 
-            # store in replay buffer (concatenate ctrl+dist as single action vector)
-            combined_act = np.concatenate([act_ctrl, act_dist])
-            self.buffer.add(obs, next_obs, combined_act, reward, terminated, truncated)
+            # Handle auto-reset
+            real_next_obs = next_obs.copy()
+            if "final_observation" in infos:
+                for i in range(N):
+                    if infos["_final_observation"][i]:
+                        real_next_obs[i] = infos["final_observation"][i]
 
-            # store in dataset logger
-            dist_params = np.array([float(has_dist), self.disturbance_ratio])
-            self.dataset_logger.log(
-                TransitionRecord(
-                    t=ep_len,
-                    episode_id=episode_id,
-                    obs=obs,
-                    action_ctrl=act_ctrl,
-                    action_dist=act_dist,
-                    action_total=act_total,
-                    reward=reward,
-                    terminated=terminated,
-                    truncated=truncated,
-                    disturbance_params=dist_params,
-                    disturbance_tag="adversary" if has_dist else "none",
-                )
+            # Store combined action in buffer
+            combined_acts = np.concatenate([acts_ctrl, acts_dist], axis=1)
+            self.buffer.add_batch(
+                obs, real_next_obs, combined_acts,
+                rews.reshape(-1, 1),
+                terms.reshape(-1, 1),
+                truncs.reshape(-1, 1),
             )
 
+            # Per-env episode tracking
+            ep_rets += rews
+            ep_lens += 1
+            dones = terms | truncs
+
+            for i in range(N):
+                if dones[i]:
+                    with open(self._csv_path, "a", newline="") as f:
+                        csv.writer(f).writerow([global_step, ep_rets[i],
+                                                int(has_dist[i])])
+                    print(f"  step={global_step}  ret={ep_rets[i]:.1f}  "
+                          f"len={ep_lens[i]}  dist={has_dist[i]}")
+                    self.dataset_logger.end_episode()
+
+                    # Collect transformer data from this env's episode
+                    if self.use_transformer:
+                        seq_len = self.detector.sequence_length
+                        if len(ep_obs_histories[i]) >= seq_len:
+                            obs_seq = np.array(
+                                ep_obs_histories[i][-seq_len:], dtype=np.float32)
+                            self._collect_detector_data(
+                                obs_seq, bool(has_dist[i]), ep_rets[i])
+
+                    # Reset per-env state
+                    ep_rets[i] = 0.0
+                    ep_lens[i] = 0
+                    ep_obs_histories[i] = []
+                    has_dist[i] = np.random.rand() < self.disturbance_probability
+                    episode_ids[i] = next_episode_id
+                    next_episode_id += 1
+
             obs = next_obs
-            ep_ret += reward
-            ep_len += 1
-
-            # --- episode boundary ---
-            if terminated or truncated or ep_len >= self.max_ep_len:
-                with open(self._csv_path, "a", newline="") as f:
-                    csv.writer(f).writerow([t, ep_ret, int(has_dist)])
-                print(f"  step={t+1}  ret={ep_ret:.1f}  len={ep_len}  dist={has_dist}")
-                self.dataset_logger.end_episode()
-
-                # collect transformer data
-                if self.use_transformer:
-                    seq_len = self.detector.sequence_length
-                    if len(ep_obs_history) >= seq_len:
-                        obs_seq = np.array(ep_obs_history[-seq_len:], dtype=np.float32)
-                        self._collect_detector_data(obs_seq, has_dist, ep_ret)
-                    self.blender.reset()
-
-                # reset episode
-                obs, _ = self.env.reset()
-                ep_ret, ep_len = 0.0, 0
-                ep_obs_history = []
-                has_dist = np.random.rand() < self.disturbance_probability
-                episode_id += 1
 
             # --- network updates ---
-            if t >= self.update_after and t % self.update_every == 0:
+            if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
                     batch = self.buffer.sample(self.batch_size)
                     self._update(batch)
 
                 # train transformer periodically
-                if self.use_transformer and t % self.transformer_train_interval == 0:
+                if self.use_transformer and global_step % self.transformer_train_interval < N:
                     for _ in range(50):
-                        info_det = self._train_detector(batch_size=64)
-                        if info_det:
-                            pass  # suppress spam; logged in dataset
+                        self._train_detector(batch_size=64)
 
             # --- epoch boundary ---
-            if (t + 1) % self.steps_per_epoch == 0:
-                epoch = (t + 1) // self.steps_per_epoch
-                print(f"[AdversarialDDPG] Epoch {epoch}/{epochs}  "
-                      f"elapsed={time.time()-t0:.0f}s")
-                if epoch % self.save_freq == 0:
-                    self.save()
+            if (global_step + N) % self.steps_per_epoch < N:
+                epoch = (global_step + N) // self.steps_per_epoch
+                if epoch > 0:
+                    print(f"[AdversarialDDPG] Epoch {epoch}/{epochs}  "
+                          f"elapsed={time.time()-t0:.0f}s")
+                    if epoch % self.save_freq == 0:
+                        self.save()
 
     # ------------------------------------------------------------------
     def save(self, path: Optional[str] = None) -> None:
