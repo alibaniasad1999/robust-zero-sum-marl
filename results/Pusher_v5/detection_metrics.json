@@ -1,0 +1,12 @@
+{
+  "rzsm": {
+    "det_precision": 1.0,
+    "det_recall": 0.9998,
+    "det_f1": 0.9998999899989999,
+    "det_accuracy": 0.9998,
+    "det_tp": 4999.0,
+    "det_fp": 0.0,
+    "det_fn": 1.0,
+    "det_tn": 0.0
+  }
+}
