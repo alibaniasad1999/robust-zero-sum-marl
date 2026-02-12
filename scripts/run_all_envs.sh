@@ -20,7 +20,7 @@ fi
 # Paper-standard: 1M total transitions (steps_per_epoch=4000 × epochs=250).
 NUM_SEEDS=5
 EPOCHS=250
-NUM_ENVS=100
+NUM_ENVS=10
 
 # ── Parse args ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

@@ -20,7 +20,7 @@ cd "$PROJECT_DIR"
 # ── Defaults ────────────────────────────────────────────────────────
 NUM_SEEDS=5
 EPOCHS=250
-NUM_ENVS=100
+NUM_ENVS=10
 PLOTS_ONLY=false
 
 while [[ $# -gt 0 ]]; do

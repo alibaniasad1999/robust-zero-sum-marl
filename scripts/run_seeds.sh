@@ -22,7 +22,7 @@ fi
 # num_envs only affects speed (parallelism), NOT total transitions.
 NUM_SEEDS=5
 EPOCHS=250
-NUM_ENVS=100
+NUM_ENVS=10
 ENV="Ant-v5"
 
 # ── Parse args ──────────────────────────────────────────────────────
