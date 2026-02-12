@@ -1,0 +1,20 @@
+
+[21:32:01] START  HalfCheetah-v5
+[21:32:01] START  HumanoidStandup-v5
+[21:32:01] START  Hopper-v5
+[21:32:01] START  Ant-v5
+[21:32:01] START  Humanoid-v5
+[21:32:01] START  InvertedPendulum-v5
+[21:32:01] START  InvertedDoublePendulum-v5
+[21:32:01] START  Pusher-v5
+[21:32:01] START  Reacher-v5
+[21:32:01] START  Swimmer-v5
+[21:32:01] START  Walker2d-v5
+[21:32:58] DONE   InvertedPendulum-v5
+[21:33:05] DONE   InvertedDoublePendulum-v5
+[21:34:42] DONE   Reacher-v5
+[21:34:58] DONE   Humanoid-v5
+[21:35:26] DONE   Walker2d-v5
+[21:36:20] DONE   Pusher-v5
+[21:49:20] DONE   Hopper-v5
+[21:55:56] DONE   Swimmer-v5

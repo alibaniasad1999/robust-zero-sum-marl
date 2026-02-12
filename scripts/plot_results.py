@@ -282,50 +282,114 @@ def fig3_episode_length(df):
     plt.close()
 
 
+def _bin_returns(steps, returns, n_bins=200):
+    """Bin episode returns into uniform step intervals and return (bin_centers, mean_per_bin).
+
+    Each episode logs (global_step, episode_return).  Steps are NOT uniformly
+    spaced (episodes finish at different times), so we bin them into
+    ``n_bins`` equal-width intervals and average returns within each bin.
+    Empty bins are forward-filled so the curve is continuous.
+    """
+    if len(steps) == 0:
+        return np.array([]), np.array([])
+
+    s_min, s_max = steps.min(), steps.max()
+    if s_max <= s_min:
+        return np.array([s_min]), np.array([returns.mean()])
+
+    bin_edges = np.linspace(s_min, s_max, n_bins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_idx = np.digitize(steps, bin_edges) - 1            # 0-based
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+    bin_means = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        mask = bin_idx == b
+        if mask.any():
+            bin_means[b] = returns[mask].mean()
+
+    # Forward-fill NaN bins (carry last observed value)
+    last_valid = np.nan
+    for b in range(n_bins):
+        if np.isnan(bin_means[b]):
+            bin_means[b] = last_valid
+        else:
+            last_valid = bin_means[b]
+    # Back-fill any leading NaNs
+    first_valid = bin_means[~np.isnan(bin_means)]
+    if len(first_valid) > 0:
+        bin_means[np.isnan(bin_means)] = first_valid[0]
+
+    return bin_centers, bin_means
+
+
 def fig4_training_curves():
-    """Fig 4: Training curves with multi-seed mean +/- std bands."""
+    """Fig 4: Training curves with multi-seed mean +/- std bands.
+
+    Episodes complete at irregular global-step values and different seeds /
+    methods have different episode counts.  We bin each seed's returns into
+    uniform step intervals, interpolate onto a common grid, then compute
+    cross-seed mean ± std.
+    """
+    N_BINS = 200          # resolution of the step grid per seed
     fig, ax = plt.subplots(figsize=(5.5, 3))
+
+    any_plotted = False
+    seed_counts = {}
 
     for method in METHODS:
         seed_csvs = _discover_seed_csvs(method)
         if not seed_csvs:
             continue
 
-        # Load all seeds
-        all_returns = []
-        common_steps = None
-
+        # --- Bin each seed independently --------------------------------
+        seed_curves = []    # list of (bin_centers, bin_means)
         for csv_file in seed_csvs:
             data = pd.read_csv(csv_file)
-            steps_col = data.columns[0]
-            ret_col = data.columns[1]
-            steps = data[steps_col].values
-            returns = data[ret_col].values
+            steps = data.iloc[:, 0].values.astype(float)
+            returns = data.iloc[:, 1].values.astype(float)
+            # Sort by step (should already be, but be safe)
+            order = np.argsort(steps)
+            steps, returns = steps[order], returns[order]
+            bc, bm = _bin_returns(steps, returns, n_bins=N_BINS)
+            if len(bc) > 0:
+                seed_curves.append((bc, bm))
 
-            all_returns.append(returns)
-            if common_steps is None:
-                common_steps = steps
-
-        if common_steps is None:
+        if not seed_curves:
             continue
 
-        # Truncate to shortest seed length
-        min_len = min(len(r) for r in all_returns)
-        common_steps = common_steps[:min_len]
-        all_returns = np.array([r[:min_len] for r in all_returns])
+        # --- Build a common step grid across seeds ----------------------
+        #   range = [max of all seed start-steps, min of all seed end-steps]
+        #   so we only plot the overlapping region.
+        grid_lo = max(c[0] for c, _ in seed_curves)
+        grid_hi = min(c[-1] for c, _ in seed_curves)
+        if grid_hi <= grid_lo:
+            # No overlap — just use the first seed's range
+            grid_lo = seed_curves[0][0][0]
+            grid_hi = seed_curves[0][0][-1]
 
-        # Compute cross-seed statistics
-        mean_ret = np.mean(all_returns, axis=0)
-        std_ret = np.std(all_returns, axis=0)
+        common_steps = np.linspace(grid_lo, grid_hi, N_BINS)
+
+        # --- Interpolate each seed onto the common grid -----------------
+        interp_returns = []
+        for bc, bm in seed_curves:
+            interp = np.interp(common_steps, bc, bm)
+            interp_returns.append(interp)
+
+        interp_returns = np.array(interp_returns)             # (n_seeds, N_BINS)
+        mean_ret = np.mean(interp_returns, axis=0)
+        std_ret = np.std(interp_returns, axis=0)
 
         # Smooth for readability
-        window = min(5, max(1, min_len // 10))
+        window = max(1, N_BINS // 40)
         mean_smooth = pd.Series(mean_ret).rolling(window=window, min_periods=1).mean().values
         std_smooth = pd.Series(std_ret).rolling(window=window, min_periods=1).mean().values
 
         label = METHOD_LABELS[method]
-        if len(seed_csvs) > 1:
-            label += f" ({len(seed_csvs)} seeds)"
+        n_seeds = len(seed_curves)
+        seed_counts[method] = n_seeds
+        if n_seeds > 1:
+            label += f" ({n_seeds} seeds)"
 
         ax.plot(
             common_steps, mean_smooth,
@@ -335,20 +399,25 @@ def fig4_training_curves():
             alpha=0.9,
         )
 
-        # Confidence band: mean +/- std across seeds
-        ax.fill_between(
-            common_steps,
-            mean_smooth - std_smooth,
-            mean_smooth + std_smooth,
-            color=COLORS[method],
-            alpha=0.15,
-        )
+        if n_seeds > 1:
+            ax.fill_between(
+                common_steps,
+                mean_smooth - std_smooth,
+                mean_smooth + std_smooth,
+                color=COLORS[method],
+                alpha=0.15,
+            )
+        any_plotted = True
 
-    n_seeds = max(len(_discover_seed_csvs(m)) for m in METHODS
-                  if _discover_seed_csvs(m))
+    if not any_plotted:
+        print("  fig4: no training data found – skipping.")
+        plt.close()
+        return
+
+    max_seeds = max(seed_counts.values()) if seed_counts else 1
     title = f"Training Curves — {ENV_ID}"
-    if n_seeds > 1:
-        title += f" (mean ± std, {n_seeds} seeds)"
+    if max_seeds > 1:
+        title += f" (mean ± std, {max_seeds} seeds)"
 
     ax.set_xlabel("Environment Steps")
     ax.set_ylabel("Episode Return")
