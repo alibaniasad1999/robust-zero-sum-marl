@@ -8,6 +8,13 @@
 
 set -euo pipefail
 
+# Activate virtual environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+if [[ -f "$PROJECT_DIR/.env/bin/activate" ]]; then
+  source "$PROJECT_DIR/.env/bin/activate"
+fi
+
 # ── Defaults ────────────────────────────────────────────────────────
 NUM_SEEDS=5
 EPOCHS=100
@@ -107,8 +114,28 @@ echo ""
 echo "=========================================="
 echo "  Training complete!"
 echo "  Checkpoints: ${LOG_BASE}/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/"
+echo "=========================================="
+
+# ── Phase 6: Evaluate ───────────────────────────────────────────────
 echo ""
-echo "  Next steps:"
-echo "    python -m src.eval --env $ENV --checkpoint-dir ${LOG_BASE}/ --episodes 50"
-echo "    python scripts/plot_results.py --env $ENV"
+echo ">>> Phase 6: Running evaluation..."
+python -m src.eval --env "$ENV" --checkpoint-dir "${LOG_BASE}/" --episodes 50
+
+# ── Phase 7: Plot results ───────────────────────────────────────────
+echo ""
+echo ">>> Phase 7: Generating plots..."
+python scripts/plot_results.py --env "$ENV" --log-dir logs
+
+# ── Phase 8: Git push results ───────────────────────────────────────
+echo ""
+echo ">>> Phase 8: Pushing results to git..."
+TIMESTAMP=$(date +"%Y-%m-%d_%H:%M")
+git add -A "logs/${ENV_SAFE}/" "results/${ENV_SAFE}/" "results/figures/" 2>/dev/null || true
+git add -A results/ logs/ 2>/dev/null || true
+git commit -m "Training results: ${ENV} ${NUM_SEEDS} seeds ${EPOCHS} epochs [${TIMESTAMP}]" || echo "  Nothing to commit."
+git push || echo "  Git push failed — check remote config."
+
+echo ""
+echo "=========================================="
+echo "  All done! Results committed & pushed."
 echo "=========================================="
