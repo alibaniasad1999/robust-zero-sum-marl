@@ -32,6 +32,7 @@ from src.networks.mlp import (
 )
 from src.utils.buffers.replay_buffer import ReplayBuffer, ReplayBatch
 from src.utils.logger import DatasetLogger, TransitionRecord
+from src.utils.perf_logger import PerformanceLogger
 from src.detector.transformer import (
     TransformerDisturbanceDetector,
     HistoryBuffer,
@@ -90,9 +91,11 @@ class DDPGAgent:
         np.random.seed(seed)
 
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
+        print(f"Device is: {self.device}")
 
         # Vectorized environment
         self.num_envs = num_envs
@@ -103,8 +106,10 @@ class DDPGAgent:
         self.act_limit = float(self.envs.single_action_space.high[0])
 
         # Networks
-        self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
-        self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation).to(self.device)
+        self.pi = MLPActor(obs_dim, act_dim, hidden_sizes,
+                           activation, self.act_limit).to(self.device)
+        self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes,
+                              activation).to(self.device)
         self.pi_targ = deepcopy(self.pi)
         self.q_targ = deepcopy(self.q)
         for p in list(self.pi_targ.parameters()) + list(self.q_targ.parameters()):
@@ -140,6 +145,9 @@ class DDPGAgent:
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         self._csv_path = os.path.join(log_dir, "training_returns.csv")
+
+        # Performance logger (GPU vs CPU speed tracking)
+        self.perf = PerformanceLogger(self.device, log_dir)
 
         print(f"[DDPGAgent] device={self.device}  num_envs={num_envs}  "
               f"pi_params={count_vars(self.pi)}  q_params={count_vars(self.q)}")
@@ -230,6 +238,10 @@ class DDPGAgent:
         epoch_metrics: Dict[str, list] = defaultdict(list)
         epoch_returns: list[float] = []
         epoch_lengths: list[int] = []
+        epoch_env_steps = 0
+        epoch_update_count = 0
+
+        self.perf.start_epoch()
 
         for t in range(total_steps):
             global_step = t * N
@@ -241,7 +253,10 @@ class DDPGAgent:
             else:
                 acts = self._get_action(obs, self.act_noise)
 
+            self.perf.start("env_step")
             next_obs, rews, terms, truncs, infos = self.envs.step(acts)
+            self.perf.stop("env_step")
+            epoch_env_steps += N
 
             # Use final_observation for terminal transitions (auto-reset)
             real_next_obs = next_obs.copy()
@@ -275,8 +290,13 @@ class DDPGAgent:
             # Network updates
             if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
+                    self.perf.start("buffer_sample")
                     batch = self.buffer.sample(self.batch_size)
+                    self.perf.stop("buffer_sample")
+                    self.perf.start("update")
                     m = self._update(batch)
+                    self.perf.stop("update")
+                    epoch_update_count += 1
                     for k, v in m.items():
                         epoch_metrics[k].append(v)
 
@@ -285,11 +305,14 @@ class DDPGAgent:
                 epoch = (global_step + N) // self.steps_per_epoch
                 if epoch > 0:
                     elapsed = time.time() - t0
-                    mean_ret = np.mean(epoch_returns) if epoch_returns else float("nan")
-                    mean_len = np.mean(epoch_lengths) if epoch_lengths else float("nan")
+                    mean_ret = np.mean(
+                        epoch_returns) if epoch_returns else float("nan")
+                    mean_len = np.mean(
+                        epoch_lengths) if epoch_lengths else float("nan")
 
                     # Compute epoch-averaged metrics
-                    avg = {k: np.mean(v) for k, v in epoch_metrics.items() if v}
+                    avg = {k: np.mean(v)
+                           for k, v in epoch_metrics.items() if v}
 
                     print(f"\n[DDPGAgent] Epoch {epoch}/{epochs}  "
                           f"elapsed={elapsed:.0f}s  "
@@ -313,8 +336,10 @@ class DDPGAgent:
                             f"{avg.get('q_val', ''):.4f}" if avg else "",
                             f"{avg.get('grad_q', ''):.4f}" if avg else "",
                             f"{avg.get('grad_pi', ''):.4f}" if avg else "",
-                            f"{mean_ret:.2f}" if not np.isnan(mean_ret) else "",
-                            f"{mean_len:.1f}" if not np.isnan(mean_len) else "",
+                            f"{mean_ret:.2f}" if not np.isnan(
+                                mean_ret) else "",
+                            f"{mean_len:.1f}" if not np.isnan(
+                                mean_len) else "",
                             len(epoch_returns),
                             len(self.buffer),
                             f"{elapsed:.1f}",
@@ -324,6 +349,16 @@ class DDPGAgent:
                     epoch_metrics = defaultdict(list)
                     epoch_returns = []
                     epoch_lengths = []
+
+                    # Performance summary
+                    self.perf.epoch_summary(
+                        epoch, global_step,
+                        steps_this_epoch=epoch_env_steps,
+                        updates_this_epoch=epoch_update_count,
+                    )
+                    epoch_env_steps = 0
+                    epoch_update_count = 0
+                    self.perf.start_epoch()
 
                     if epoch % self.save_freq == 0:
                         self.save()
@@ -337,8 +372,10 @@ class DDPGAgent:
         print(f"  [saved] {path}")
 
     def load(self, path: str) -> None:
-        self.pi.load_state_dict(torch.load(os.path.join(path, "pi.pt"), map_location=self.device))
-        self.q.load_state_dict(torch.load(os.path.join(path, "q.pt"), map_location=self.device))
+        self.pi.load_state_dict(torch.load(os.path.join(
+            path, "pi.pt"), map_location=self.device))
+        self.q.load_state_dict(torch.load(os.path.join(
+            path, "q.pt"), map_location=self.device))
         self.pi_targ = deepcopy(self.pi)
         self.q_targ = deepcopy(self.q)
         print(f"  [loaded] {path}")
@@ -400,7 +437,8 @@ class AdversarialDDPGAgent:
         np.random.seed(seed)
 
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
@@ -414,9 +452,12 @@ class AdversarialDDPGAgent:
         self.dist_limit = self.act_limit * disturbance_ratio
 
         # ---- networks ----
-        self.pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
-        self.pi_adv = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.dist_limit).to(self.device)
-        self.q = AdversarialMLPQFunction(obs_dim, act_dim, act_dim, hidden_sizes, activation).to(self.device)
+        self.pi_rob = MLPActor(
+            obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
+        self.pi_adv = MLPActor(
+            obs_dim, act_dim, hidden_sizes, activation, self.dist_limit).to(self.device)
+        self.q = AdversarialMLPQFunction(
+            obs_dim, act_dim, act_dim, hidden_sizes, activation).to(self.device)
 
         # targets
         self.pi_rob_targ = deepcopy(self.pi_rob)
@@ -430,9 +471,11 @@ class AdversarialDDPGAgent:
         # optional optimal policy
         self.pi_opt: Optional[MLPActor] = None
         if pi_opt_path is not None:
-            self.pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
+            self.pi_opt = MLPActor(
+                obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
             self.pi_opt.load_state_dict(
-                torch.load(os.path.join(pi_opt_path, "pi.pt"), map_location=self.device)
+                torch.load(os.path.join(pi_opt_path, "pi.pt"),
+                           map_location=self.device)
             )
             self.pi_opt.eval()
             for p in self.pi_opt.parameters():
@@ -478,6 +521,9 @@ class AdversarialDDPGAgent:
         self._csv_path = os.path.join(log_dir, "training_returns.csv")
         self.dataset_logger = DatasetLogger(os.path.join(log_dir, "dataset"))
 
+        # Performance logger (GPU vs CPU speed tracking)
+        self.perf = PerformanceLogger(self.device, log_dir)
+
         # ---- transformer disturbance detector ----
         self.use_transformer = use_transformer
         self.transformer_train_interval = transformer_train_interval
@@ -489,7 +535,8 @@ class AdversarialDDPGAgent:
                 nhead=transformer_nhead,
                 num_layers=transformer_layers,
             ).to(self.device)
-            self.history_buf = HistoryBuffer(obs_dim, transformer_seq_len, self.device)
+            self.history_buf = HistoryBuffer(
+                obs_dim, transformer_seq_len, self.device)
             self.blender = AdaptiveControllerBlender(
                 self.detector, self.history_buf, smoothing_window=5
             )
@@ -533,7 +580,7 @@ class AdversarialDDPGAgent:
         r = batch.rew.squeeze(-1)
         d = batch.done.float().squeeze(-1)
         a_ctrl = batch.act[:, : self.act_dim]
-        a_dist = batch.act[:, self.act_dim :]
+        a_dist = batch.act[:, self.act_dim:]
 
         # ---- critic ----
         with torch.no_grad():
@@ -602,7 +649,8 @@ class AdversarialDDPGAgent:
         else:
             alpha_target = np.clip(0.5 + ep_return / 200.0, 0.5, 1.0)
         self._transformer_data.append(
-            {"obs_seq": obs_seq, "dist": float(has_dist), "alpha": alpha_target}
+            {"obs_seq": obs_seq, "dist": float(
+                has_dist), "alpha": alpha_target}
         )
         if len(self._transformer_data) > 10_000:
             self._transformer_data.pop(0)
@@ -610,11 +658,15 @@ class AdversarialDDPGAgent:
     def _train_detector(self, batch_size: int = 64) -> Dict[str, float]:
         if len(self._transformer_data) < batch_size:
             return {}
-        idxs = np.random.choice(len(self._transformer_data), batch_size, replace=False)
+        idxs = np.random.choice(
+            len(self._transformer_data), batch_size, replace=False)
         items = [self._transformer_data[i] for i in idxs]
-        obs = torch.stack([torch.as_tensor(x["obs_seq"], dtype=torch.float32, device=self.device) for x in items])
-        dist = torch.tensor([x["dist"] for x in items], dtype=torch.float32, device=self.device)
-        alpha = torch.tensor([x["alpha"] for x in items], dtype=torch.float32, device=self.device)
+        obs = torch.stack([torch.as_tensor(
+            x["obs_seq"], dtype=torch.float32, device=self.device) for x in items])
+        dist = torch.tensor([x["dist"] for x in items],
+                            dtype=torch.float32, device=self.device)
+        alpha = torch.tensor([x["alpha"] for x in items],
+                             dtype=torch.float32, device=self.device)
         return self.det_trainer.train_step(obs, dist, alpha)
 
     # ------------------------------------------------------------------
@@ -624,7 +676,8 @@ class AdversarialDDPGAgent:
 
         if not os.path.isfile(self._csv_path):
             with open(self._csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(["step", "episode_return", "has_disturbance"])
+                csv.writer(f).writerow(
+                    ["step", "episode_return", "has_disturbance"])
 
         # Metrics CSV
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
@@ -663,6 +716,10 @@ class AdversarialDDPGAgent:
         epoch_returns: list[float] = []
         epoch_lengths: list[int] = []
         epoch_dist_eps: int = 0
+        epoch_env_steps = 0
+        epoch_update_count = 0
+
+        self.perf.start_epoch()
 
         for t in range(total_steps):
             global_step = t * N
@@ -688,7 +745,10 @@ class AdversarialDDPGAgent:
                     np.zeros(self.act_dim, dtype=np.float32))
 
             acts_total = acts_ctrl + acts_dist
+            self.perf.start("env_step")
             next_obs, rews, terms, truncs, infos = self.envs.step(acts_total)
+            self.perf.stop("env_step")
+            epoch_env_steps += N
 
             # Handle auto-reset
             real_next_obs = next_obs.copy()
@@ -735,7 +795,8 @@ class AdversarialDDPGAgent:
                     ep_rets[i] = 0.0
                     ep_lens[i] = 0
                     ep_obs_histories[i] = []
-                    has_dist[i] = np.random.rand() < self.disturbance_probability
+                    has_dist[i] = np.random.rand(
+                    ) < self.disturbance_probability
                     episode_ids[i] = next_episode_id
                     next_episode_id += 1
 
@@ -744,8 +805,13 @@ class AdversarialDDPGAgent:
             # --- network updates ---
             if global_step >= self.update_after and t % self.update_every == 0:
                 for _ in range(self.n_updates):
+                    self.perf.start("buffer_sample")
                     batch = self.buffer.sample(self.batch_size)
+                    self.perf.stop("buffer_sample")
+                    self.perf.start("update")
                     m = self._update(batch)
+                    self.perf.stop("update")
+                    epoch_update_count += 1
                     for k, v in m.items():
                         epoch_metrics[k].append(v)
 
@@ -762,11 +828,15 @@ class AdversarialDDPGAgent:
                 epoch = (global_step + N) // self.steps_per_epoch
                 if epoch > 0:
                     elapsed = time.time() - t0
-                    mean_ret = np.mean(epoch_returns) if epoch_returns else float("nan")
-                    mean_len = np.mean(epoch_lengths) if epoch_lengths else float("nan")
+                    mean_ret = np.mean(
+                        epoch_returns) if epoch_returns else float("nan")
+                    mean_len = np.mean(
+                        epoch_lengths) if epoch_lengths else float("nan")
 
-                    avg = {k: np.mean(v) for k, v in epoch_metrics.items() if v}
-                    avg_det = {k: np.mean(v) for k, v in epoch_det_metrics.items() if v}
+                    avg = {k: np.mean(v)
+                           for k, v in epoch_metrics.items() if v}
+                    avg_det = {k: np.mean(v)
+                               for k, v in epoch_det_metrics.items() if v}
 
                     print(f"\n[AdversarialDDPG] Epoch {epoch}/{epochs}  "
                           f"elapsed={elapsed:.0f}s  "
@@ -819,6 +889,16 @@ class AdversarialDDPGAgent:
                     epoch_lengths = []
                     epoch_dist_eps = 0
 
+                    # Performance summary
+                    self.perf.epoch_summary(
+                        epoch, global_step,
+                        steps_this_epoch=epoch_env_steps,
+                        updates_this_epoch=epoch_update_count,
+                    )
+                    epoch_env_steps = 0
+                    epoch_update_count = 0
+                    self.perf.start_epoch()
+
                     if epoch % self.save_freq == 0:
                         self.save()
 
@@ -830,18 +910,23 @@ class AdversarialDDPGAgent:
         torch.save(self.pi_adv.state_dict(), os.path.join(path, "pi_adv.pt"))
         torch.save(self.q.state_dict(), os.path.join(path, "q.pt"))
         if self.use_transformer:
-            torch.save(self.detector.state_dict(), os.path.join(path, "detector.pt"))
+            torch.save(self.detector.state_dict(),
+                       os.path.join(path, "detector.pt"))
         print(f"  [saved] {path}")
 
     def load(self, path: str) -> None:
-        self.pi_rob.load_state_dict(torch.load(os.path.join(path, "pi_rob.pt"), map_location=self.device))
-        self.pi_adv.load_state_dict(torch.load(os.path.join(path, "pi_adv.pt"), map_location=self.device))
-        self.q.load_state_dict(torch.load(os.path.join(path, "q.pt"), map_location=self.device))
+        self.pi_rob.load_state_dict(torch.load(os.path.join(
+            path, "pi_rob.pt"), map_location=self.device))
+        self.pi_adv.load_state_dict(torch.load(os.path.join(
+            path, "pi_adv.pt"), map_location=self.device))
+        self.q.load_state_dict(torch.load(os.path.join(
+            path, "q.pt"), map_location=self.device))
         self.pi_rob_targ = deepcopy(self.pi_rob)
         self.pi_adv_targ = deepcopy(self.pi_adv)
         self.q_targ = deepcopy(self.q)
         if self.use_transformer:
             det_path = os.path.join(path, "detector.pt")
             if os.path.isfile(det_path):
-                self.detector.load_state_dict(torch.load(det_path, map_location=self.device))
+                self.detector.load_state_dict(
+                    torch.load(det_path, map_location=self.device))
         print(f"  [loaded] {path}")

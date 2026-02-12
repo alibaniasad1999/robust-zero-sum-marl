@@ -58,7 +58,8 @@ def main() -> None:
     args = p.parse_args()
 
     env_fn = make_env(args.env)
-    base_log_dir = args.log_dir or f"logs/{args.mode}"
+    env_safe = args.env.replace("-", "_")
+    base_log_dir = args.log_dir or f"logs/{env_safe}/{args.mode}"
     log_dir = os.path.join(base_log_dir, f"seed_{args.seed}")
 
     if args.mode == "nominal":
