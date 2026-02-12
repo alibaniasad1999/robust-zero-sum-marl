@@ -17,8 +17,9 @@ if [[ -f "$PROJECT_DIR/.env/bin/activate" ]]; then
 fi
 
 # ── Defaults ────────────────────────────────────────────────────────
+# Paper-standard: 1M total transitions (steps_per_epoch=4000 × epochs=250).
 NUM_SEEDS=5
-EPOCHS=100
+EPOCHS=250
 NUM_ENVS=100
 
 # ── Parse args ──────────────────────────────────────────────────────

@@ -2,9 +2,10 @@
 # Train all methods across multiple seeds.
 #
 # Usage:
-#   bash scripts/run_seeds.sh                    # default: 5 seeds, 100 epochs
-#   bash scripts/run_seeds.sh --seeds 3 --epochs 50
-#   bash scripts/run_seeds.sh --seeds 5 --epochs 100 --num-envs 10
+#   bash scripts/run_seeds.sh                    # default: 5 seeds, 250 epochs (1M steps)
+#   bash scripts/run_seeds.sh --seeds 3 --epochs 125  # 500K steps
+#   bash scripts/run_seeds.sh --env Humanoid-v5 --epochs 750  # 3M steps (paper-standard for hard envs)
+#   bash scripts/run_seeds.sh --seeds 5 --epochs 250 --num-envs 200  # faster with more parallel envs
 
 set -euo pipefail
 
@@ -16,8 +17,11 @@ if [[ -f "$PROJECT_DIR/.env/bin/activate" ]]; then
 fi
 
 # ── Defaults ────────────────────────────────────────────────────────
+# Paper-standard: 1M total transitions (steps_per_epoch=4000 × epochs=250).
+# For harder envs (Ant, Humanoid, HumanoidStandup) use --epochs 750 (3M steps).
+# num_envs only affects speed (parallelism), NOT total transitions.
 NUM_SEEDS=5
-EPOCHS=100
+EPOCHS=250
 NUM_ENVS=100
 ENV="Ant-v5"
 
