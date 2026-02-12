@@ -137,12 +137,14 @@ def main() -> None:
     p.add_argument("--update-after", type=int, default=10000)
     p.add_argument("--num-envs", type=int, default=1)
     p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--log-dir", type=str, default="logs/sa_mdp")
+    p.add_argument("--log-dir", type=str, default=None)
     p.add_argument("--eps", type=float, default=0.05,
                     help="SA-MDP perturbation radius (ℓ∞)")
     args = p.parse_args()
 
     env_fn = lambda: gym.make(args.env)
+    env_safe = args.env.replace("-", "_")
+    log_dir = args.log_dir or f"logs/{env_safe}/sa_mdp"
 
     agent = SAMDPAgent(
         env_fn,
@@ -155,7 +157,7 @@ def main() -> None:
         update_after=args.update_after,
         num_envs=args.num_envs,
         device=args.device,
-        log_dir=args.log_dir,
+        log_dir=log_dir,
     )
     agent.train()
     agent.save()

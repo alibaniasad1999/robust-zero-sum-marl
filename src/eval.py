@@ -611,8 +611,9 @@ def main() -> None:
     p.add_argument("--scenarios", type=str,
                     default="nominal,force,params,noise,combined",
                     help="Comma-separated disturbance scenarios")
-    p.add_argument("--checkpoint-dir", type=str, default="logs/",
-                    help="Root dir containing method subdirectories")
+    p.add_argument("--checkpoint-dir", type=str, default=None,
+                    help="Root dir containing method subdirectories "
+                         "(default: logs/<env_safe>/)")
     p.add_argument("--episodes", type=int, default=50,
                     help="Evaluation episodes per (method, scenario, seed)")
     p.add_argument("--output", type=str, default="results/",
@@ -621,6 +622,11 @@ def main() -> None:
     p.add_argument("--pi-opt-dir", type=str, default=None,
                     help="Override pi_opt checkpoint dir for RZSM")
     args = p.parse_args()
+
+    # Default checkpoint-dir uses env name
+    if args.checkpoint_dir is None:
+        env_safe = args.env.replace("-", "_")
+        args.checkpoint_dir = f"logs/{env_safe}/"
 
     run_evaluation(args)
     print("\nDone.")

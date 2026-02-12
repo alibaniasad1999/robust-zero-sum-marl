@@ -51,10 +51,13 @@ plt.rcParams.update({
     "axes.spines.right": False,
 })
 
-# ── Config ──────────────────────────────────────────────────────────
+# ── Config (set dynamically via --env) ──────────────────────────────
+# Defaults; overridden by parse_args() below
+ENV_ID = "Ant-v5"
+ENV_SAFE = "Ant_v5"
 RESULTS_CSV = "results/Ant_v5/comparison_table.csv"
-LOG_DIR = "logs"
-OUTPUT_DIR = "results/figures"
+LOG_DIR = "logs/Ant_v5"
+OUTPUT_DIR = "results/Ant_v5/figures"
 
 METHODS = ["vanilla", "rarl", "sa_mdp", "dr", "rzsm"]
 SCENARIOS = ["nominal", "force", "params", "noise", "combined"]
@@ -91,6 +94,18 @@ HATCHES = {
     "dr":      "xx",
     "rzsm":    "",
 }
+
+
+def parse_args():
+    import argparse
+    p = argparse.ArgumentParser(description="Generate plots from evaluation results")
+    p.add_argument("--env", type=str, default="Ant-v5",
+                    help="Gymnasium env id (must match eval results)")
+    p.add_argument("--results-dir", type=str, default="results",
+                    help="Root results directory")
+    p.add_argument("--log-dir", type=str, default="logs",
+                    help="Root log directory")
+    return p.parse_args()
 
 
 def load_data():
@@ -156,7 +171,7 @@ def fig1_grouped_bar(df):
     ax.set_ylabel("Mean Episode Return")
 
     n_seeds = df["n_seeds"].iloc[0] if "n_seeds" in df.columns else 1
-    title = f"Ant-v5: Performance Under Disturbance Scenarios"
+    title = f"{ENV_ID}: Performance Under Disturbance Scenarios"
     if n_seeds > 1:
         title += f" ({n_seeds} seeds)"
     ax.set_title(title)
@@ -249,7 +264,7 @@ def fig3_episode_length(df):
     ax.set_xticks(x)
     ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIOS])
     ax.set_ylabel("Mean Episode Length (Survival)")
-    ax.set_title("Ant-v5: Agent Survival Under Disturbances")
+    ax.set_title(f"{ENV_ID}: Agent Survival Under Disturbances")
     ax.axhline(y=1000, color="gray", linewidth=0.8, linestyle="--",
                label="Max (1000)")
     ax.legend(
@@ -331,7 +346,7 @@ def fig4_training_curves():
 
     n_seeds = max(len(_discover_seed_csvs(m)) for m in METHODS
                   if _discover_seed_csvs(m))
-    title = "Training Curves — Ant-v5"
+    title = f"Training Curves — {ENV_ID}"
     if n_seeds > 1:
         title += f" (mean ± std, {n_seeds} seeds)"
 
@@ -399,7 +414,7 @@ def table_latex(df):
 
     print(r"\begin{table}[!t]")
     print(r"\caption{Mean episode return ($\pm$ std" + seed_note +
-          r") across disturbance scenarios on Ant-v5.}")
+          rf") across disturbance scenarios on {ENV_ID}.}}")
     print(r"\label{tab:results}")
     print(r"\centering")
     print(r"\footnotesize")
@@ -475,9 +490,18 @@ def table_latex(df):
 
 
 def main():
+    global ENV_ID, ENV_SAFE, RESULTS_CSV, LOG_DIR, OUTPUT_DIR
+
+    args = parse_args()
+    ENV_ID = args.env
+    ENV_SAFE = args.env.replace("-", "_")
+    RESULTS_CSV = os.path.join(args.results_dir, ENV_SAFE, "comparison_table.csv")
+    LOG_DIR = os.path.join(args.log_dir, ENV_SAFE)
+    OUTPUT_DIR = os.path.join(args.results_dir, ENV_SAFE, "figures")
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    print("Loading results...")
+    print(f"Loading results for {ENV_ID}...")
     df = load_data()
     n_seeds = int(df["n_seeds"].iloc[0]) if "n_seeds" in df.columns else 1
     print(f"  {len(df)} rows: {df['method'].nunique()} methods x "
