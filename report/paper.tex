@@ -16,6 +16,8 @@
 \usepackage{xcolor}
 \usepackage{multirow}
 \usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, calc, fit, backgrounds}
 
 \graphicspath{{figures/}}
 
@@ -616,6 +618,131 @@ selects between them based on the detected disturbance level, achieving
 near-optimal nominal performance and near-optimal worst-case performance
 simultaneously.
 
+\textbf{Architecture overview.}  Figure~\ref{fig:architecture} illustrates
+the complete runtime architecture.  A sliding window of recent observations
+is processed by the transformer detector to produce disturbance estimates,
+which drive the gating network to compute the mixing coefficient $\alpha_t$.
+The final action is a continuous blend of the optimal and robust policies.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=0.8cm and 1.2cm,
+  block/.style={rectangle, draw, fill=blue!10, text width=2.5cm,
+                text centered, rounded corners, minimum height=1cm},
+  smallblock/.style={rectangle, draw, fill=green!10, text width=2cm,
+                     text centered, rounded corners, minimum height=0.7cm},
+  detector/.style={rectangle, draw, fill=orange!20, text width=2.5cm,
+                   text centered, rounded corners, minimum height=1.2cm},
+  gate/.style={rectangle, draw, fill=purple!15, text width=1.8cm,
+               text centered, rounded corners, minimum height=0.8cm},
+  mix/.style={circle, draw, fill=red!15, minimum size=1cm},
+  input/.style={circle, draw, fill=gray!10, minimum size=0.6cm},
+  arrow/.style={-Stealth, thick},
+  label/.style={font=\small}
+]
+
+% Input observations (history window)
+\node[input] (o1) at (0,0) {$o_{t-L+1}$};
+\node[input, right=0.3cm of o1] (o2) {$\cdots$};
+\node[input, right=0.3cm of o2] (o3) {$o_{t-1}$};
+\node[input, right=0.3cm of o3] (ot) {$o_t$};
+
+% Transformer detector
+\node[detector, below=1.5cm of $(o2)!0.5!(o3)$] (transformer)
+  {\textbf{Transformer}\\Detector $\mathcal{T}_\theta$\\
+   \small $L=16$, $d=64$};
+
+% Detection outputs
+\node[smallblock, below left=1.2cm and 0.5cm of transformer] (prob)
+  {Detection\\$p_t \in [0,1]$};
+\node[smallblock, below right=1.2cm and 0.5cm of transformer] (mag)
+  {Magnitude\\$\hat{\delta}_t \geq 0$};
+
+% Gating network
+\node[gate, below=1.2cm of transformer] (gating)
+  {\textbf{Gating}\\$g_\phi$};
+
+% Mixing coefficient
+\node[smallblock, below=1cm of gating, fill=purple!10] (alpha)
+  {$\alpha_t \in [0,1]$};
+
+% Current observation for policies
+\node[input, right=6cm of ot] (ot_copy) {$o_t$};
+
+% Two policies
+\node[block, fill=blue!20, below left=1cm and 0.5cm of ot_copy]
+ (pi_opt) {\textbf{Optimal Policy}\\$\pi^{\text{opt}}$};
+\node[block, fill=red!20, below right=1cm and 0.5cm of ot_copy]
+ (pi_rob) {\textbf{Robust Policy}\\$\pi^{\text{rob}}$};
+
+% Policy outputs
+\node[smallblock, below=1cm of pi_opt] (a_opt)
+  {$a^{\text{opt}}_t$};
+\node[smallblock, below=1cm of pi_rob] (a_rob)
+  {$a^{\text{rob}}_t$};
+
+% Mixing node
+\node[mix, below right=0.8cm and 0.5cm of a_opt] (mixer)
+  {$\oplus$};
+
+% Final action
+\node[block, below=1cm of mixer, fill=green!20, text width=2.2cm] (action)
+  {\textbf{Action}\\$a_t$};
+
+% Arrows
+\draw[arrow] (o1) -- ($(o1)!0.5!(transformer.north)$) -| (transformer.north west);
+\draw[arrow] (o2) -- (transformer.north);
+\draw[arrow] (o3) -- (transformer.north);
+\draw[arrow] (ot) -- ($(ot)!0.5!(transformer.north)$) -| (transformer.north east);
+
+\draw[arrow] (transformer) -| (prob);
+\draw[arrow] (transformer) -| (mag);
+\draw[arrow] (prob.east) -- (gating);
+\draw[arrow] (mag.west) |- (gating);
+\draw[arrow] (gating) -- (alpha);
+
+\draw[arrow] (ot_copy) -- (pi_opt);
+\draw[arrow] (ot_copy) -- (pi_rob);
+\draw[arrow] (pi_opt) -- (a_opt);
+\draw[arrow] (pi_rob) -- (a_rob);
+
+\draw[arrow] (a_opt) -- (mixer);
+\draw[arrow] (a_rob) -- (mixer);
+\draw[arrow] (alpha) -- (mixer) node[pos=0.7, right, font=\scriptsize] {weight};
+\draw[arrow] (mixer) -- (action);
+
+% Annotations
+\node[above=0cm of o1, font=\footnotesize, text width=3.5cm, align=center] (obs_history)
+  {Observation History\\$h_t = (o_{t-L+1}, \ldots, o_t)$};
+\node[right=0.1cm of a_opt, font=\scriptsize, align=left]
+  {$(1-\alpha_t)$};
+\node[right=0.1cm of a_rob, font=\scriptsize, align=left]
+  {$\alpha_t$};
+\node[right=0.3cm of mixer, font=\scriptsize, align=left, text width=2.5cm]
+  {$a_t = \alpha_t a^{\text{rob}}_t$\\
+   $\quad + (1-\alpha_t) a^{\text{opt}}_t$};
+
+% Background regions
+\begin{scope}[on background layer]
+\node[draw=orange!50, thick, dashed, rounded corners, fit={(o1) (ot) (transformer) (prob) (mag) (gating) (alpha) (obs_history)}, inner sep=0.3cm, fill=orange!5] (detect_region) {};
+\node[draw=blue!50, thick, dashed, rounded corners, fit={(ot_copy) (pi_opt) (pi_rob) (a_opt) (a_rob)}, inner sep=0.3cm, fill=blue!5] (policy_region) {};
+\end{scope}
+
+\node[above right, font=\scriptsize\bfseries, text=orange!70!black] at (detect_region.north west) {Detection Module};
+\node[above right, font=\scriptsize\bfseries, text=blue!70!black] at (policy_region.north west) {Dual-Policy Module};
+
+\end{tikzpicture}
+\caption{Runtime architecture of the proposed method.  The transformer
+detector processes a sliding window of observations to estimate disturbance
+probability and magnitude, which drive the gating network to compute the
+mixing coefficient~$\alpha_t$.  The final action is a continuous blend of
+the optimal policy (trained on nominal environment) and the robust policy
+(trained against adversary), preserving nominal performance while providing
+worst-case robustness on demand.}
+\label{fig:architecture}
+\end{figure*}
+
 % ---------------------------------------------------------------------------
 \subsection{Adversary Training Objective}\label{sec:adv_training}
 % ---------------------------------------------------------------------------
@@ -654,6 +781,86 @@ To prevent the adversary from becoming too strong too quickly
 (which can destabilize the controller's learning), we employ curriculum
 scheduling of the disturbance budget: $\epsilon$ is linearly increased
 from $0$ to $\epsilon_{\max}$ over the first $N_{\text{warmup}}$ episodes.
+
+Figure~\ref{fig:training_flow} illustrates the two-phase training procedure
+and the data flow through the system.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  phase/.style={rectangle, draw, fill=blue!15, text width=3.5cm,
+                align=center, rounded corners, minimum height=1.2cm, thick},
+  env/.style={rectangle, draw, fill=green!15, text width=2.5cm,
+              align=center, rounded corners, minimum height=1cm},
+  agent/.style={rectangle, draw, fill=orange!15, text width=2cm,
+                align=center, rounded corners, minimum height=0.8cm},
+  data/.style={cylinder, draw, fill=purple!15, text width=1.5cm,
+               align=center, shape border rotate=90, minimum height=1cm,
+               minimum width=1.8cm},
+  arrow/.style={-Stealth, thick},
+  bidir/.style={Stealth-Stealth, thick}
+]
+
+% Phase 1
+\node[phase] (phase1) {\textbf{Phase 1:}\\Optimal Policy Training};
+\node[env, below=1cm of phase1] (env1) {Nominal\\Environment\\$a^d = \mathbf{0}$};
+\node[agent, left=1.5cm of env1] (piopt_train) {$\pi^{\text{opt}}$};
+\node[data, below=1.5cm of env1] (data1) {Dataset\\$\mathcal{D}_1$};
+
+% Phase 2
+\node[phase, right=5cm of phase1] (phase2) {\textbf{Phase 2:}\\Adversarial Training};
+\node[env, below=1cm of phase2] (env2) {Perturbed\\Environment\\$a^d \neq \mathbf{0}$};
+\node[agent, below left=1cm and 0.3cm of env2] (pirob_train) {$\pi^{\text{rob}}$};
+\node[agent, below right=1cm and 0.3cm of env2] (piadv_train) {$\pi^{\text{adv}}$};
+\node[data, below=1.5cm of env2] (data2) {Dataset\\$\mathcal{D}_2$};
+
+% Phase 3
+\node[phase, below=7.5cm of $(phase1)!0.5!(phase2)$] (phase3)
+  {\textbf{Phase 3:}\\Transformer Detector\\Training};
+\node[agent, below=1cm of phase3, fill=purple!20, text width=2.5cm]
+  (detector_train) {$\mathcal{T}_\theta$\\Supervised\\Learning};
+
+% Arrows Phase 1
+\draw[bidir] (piopt_train) -- (env1) node[midway, above, font=\scriptsize] {$s,a,r$};
+\draw[arrow] (env1) -- (data1) node[midway, right, font=\scriptsize] {log};
+
+% Arrows Phase 2
+\draw[bidir] (pirob_train.north) |- (env2) node[midway, above left, font=\scriptsize] {$a^c$};
+\draw[bidir] (piadv_train.north) |- (env2) node[midway, above right, font=\scriptsize] {$a^d$};
+\draw[arrow] (env2) -- (data2) node[midway, right, font=\scriptsize] {log};
+
+% Arrows to Phase 3
+\draw[arrow] (data1.south) |- (phase3.west);
+\draw[arrow] (data2.south) |- (phase3.east);
+\draw[arrow] (phase3) -- (detector_train);
+
+% Curriculum annotation
+\node[right=0.1cm of piadv_train, font=\scriptsize, align=left, text width=2cm]
+  {Curriculum:\\$\epsilon: 0 \to \epsilon_{\max}$};
+
+% Training labels
+\node[above=0.1cm of piopt_train, font=\scriptsize, text=blue!70!black]
+  {SAC/TD3/PPO};
+\node[above left=0.1cm of pirob_train, font=\scriptsize, text=blue!70!black]
+  {SAC/TD3};
+\node[above right=0.1cm of piadv_train, font=\scriptsize, text=red!70!black]
+  {SAC/TD3};
+
+% Dataset content annotations
+\node[below=0.7cm of data1, font=\tiny, align=center, text width=2cm]
+  {$(s,a^c,r,s')$\\no disturbance};
+\node[below=0.7cm of data2, font=\tiny, align=center, text width=2cm]
+  {$(s,a^c,a^d,r,s')$\\with labels};
+
+\end{tikzpicture}
+\caption{Training pipeline overview.  Phase~1 trains the optimal policy on
+the nominal environment.  Phase~2 co-trains the robust policy and adversary
+in a zero-sum game with curriculum scheduling of the disturbance budget.
+Both phases log complete trajectories.  Phase~3 trains the transformer
+detector via supervised learning on the combined dataset with ground-truth
+disturbance labels.}
+\label{fig:training_flow}
+\end{figure*}
 
 % ---------------------------------------------------------------------------
 \subsection{Transformer Disturbance Detector}\label{sec:transformer}
@@ -1544,13 +1751,6 @@ Future work will proceed along several directions:
   presented in Section~\ref{sec:results} to additional benchmark
   environments and physical robot hardware with longer training horizons.
 \end{enumerate}
-
-% ===========================================================================
-\section*{Acknowledgements}
-% ===========================================================================
-
-This work was supported by [Funding Agency, Grant Number].  The authors
-thank [Collaborators] for helpful discussions.
 
 % ===========================================================================
 % Bibliography
