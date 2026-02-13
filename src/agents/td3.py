@@ -1,10 +1,15 @@
 """
-DDPG agents for the zero-sum robust RL framework.
+TD3 agents for the zero-sum robust RL framework.
 
-    DDPGAgent             — trains pi_opt on the nominal environment
-    AdversarialDDPGAgent  — trains pi_rob + pi_adv in a zero-sum Markov game,
-                            with optional transformer-based disturbance detection
-                            and policy mixing
+    TD3Agent                — trains pi_opt on the nominal environment
+    AdversarialTD3Agent     — trains pi_rob + pi_adv in a zero-sum Markov game,
+                              with optional transformer-based disturbance detection
+                              and policy mixing
+
+TD3 (Twin Delayed DDPG) extends DDPG with three improvements:
+    1. Twin Q-networks (clipped double Q-learning) to reduce overestimation
+    2. Delayed policy updates (actor updated less frequently than critics)
+    3. Target policy smoothing (clipped noise on target actions)
 
 Both agents support vectorized environments via ``num_envs`` (default 1).
 """
@@ -58,9 +63,9 @@ def _grad_norm(module: nn.Module) -> float:
 
 
 # ======================================================================
-# DDPGAgent  — single-agent, trains pi_opt on nominal environment
+# TD3Agent  — single-agent, trains pi_opt on nominal environment
 # ======================================================================
-class DDPGAgent:
+class TD3Agent:
     def __init__(
         self,
         env_fn,
@@ -86,6 +91,10 @@ class DDPGAgent:
         device: str = "auto",
         log_dir: str = "logs/nominal",
         num_envs: int = 1,
+        # TD3-specific
+        policy_delay: int = 2,
+        target_noise: float = 0.2,
+        noise_clip: float = 0.5,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -105,19 +114,27 @@ class DDPGAgent:
         act_dim = self.envs.single_action_space.shape[0]
         self.act_limit = float(self.envs.single_action_space.high[0])
 
-        # Networks
+        # Networks — twin Q-functions
         self.pi = MLPActor(obs_dim, act_dim, hidden_sizes,
                            activation, self.act_limit).to(self.device)
-        self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes,
-                              activation).to(self.device)
+        self.q1 = MLPQFunction(obs_dim, act_dim, hidden_sizes,
+                               activation).to(self.device)
+        self.q2 = MLPQFunction(obs_dim, act_dim, hidden_sizes,
+                               activation).to(self.device)
+
+        # Target networks
         self.pi_targ = deepcopy(self.pi)
-        self.q_targ = deepcopy(self.q)
-        for p in list(self.pi_targ.parameters()) + list(self.q_targ.parameters()):
+        self.q1_targ = deepcopy(self.q1)
+        self.q2_targ = deepcopy(self.q2)
+        for p in (list(self.pi_targ.parameters())
+                  + list(self.q1_targ.parameters())
+                  + list(self.q2_targ.parameters())):
             p.requires_grad = False
 
         # Optimizers
         self.pi_optim = Adam(self.pi.parameters(), lr=pi_lr)
-        self.q_optim = Adam(self.q.parameters(), lr=q_lr)
+        self.q1_optim = Adam(self.q1.parameters(), lr=q_lr)
+        self.q2_optim = Adam(self.q2.parameters(), lr=q_lr)
 
         # Replay buffer
         self.buffer = ReplayBuffer(
@@ -146,11 +163,20 @@ class DDPGAgent:
         os.makedirs(log_dir, exist_ok=True)
         self._csv_path = os.path.join(log_dir, "training_returns.csv")
 
+        # TD3-specific hyperparams
+        self.policy_delay = policy_delay
+        self.target_noise = target_noise
+        self.noise_clip = noise_clip
+        self._update_count = 0
+
         # Performance logger (GPU vs CPU speed tracking)
         self.perf = PerformanceLogger(self.device, log_dir)
 
-        print(f"[DDPGAgent] device={self.device}  num_envs={num_envs}  "
-              f"pi_params={count_vars(self.pi)}  q_params={count_vars(self.q)}")
+        print(f"[TD3Agent] device={self.device}  num_envs={num_envs}  "
+              f"pi_params={count_vars(self.pi)}  "
+              f"q1_params={count_vars(self.q1)}  "
+              f"q2_params={count_vars(self.q2)}  "
+              f"policy_delay={policy_delay}")
 
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -167,44 +193,73 @@ class DDPGAgent:
         o2 = batch.next_obs
         d = batch.done.float().squeeze(-1)
 
-        # Critic
+        # ---- Critic update (both Q1 and Q2) ----
         with torch.no_grad():
+            # Target policy smoothing
             a2 = self.pi_targ(o2)
-            q_targ_val = self.q_targ(o2, a2)
+            epsilon = torch.randn_like(a2) * self.target_noise
+            epsilon = epsilon.clamp(-self.noise_clip, self.noise_clip)
+            a2 = (a2 + epsilon).clamp(-self.act_limit, self.act_limit)
+
+            # Clipped double Q-learning
+            q1_targ_val = self.q1_targ(o2, a2)
+            q2_targ_val = self.q2_targ(o2, a2)
+            q_targ_val = torch.min(q1_targ_val, q2_targ_val)
             backup = r + self.gamma * (1.0 - d) * q_targ_val
-        q_val = self.q(o, a)
-        loss_q = ((q_val - backup) ** 2).mean()
 
-        self.q_optim.zero_grad()
-        loss_q.backward()
-        grad_q = _grad_norm(self.q)
-        self.q_optim.step()
+        # Q1
+        q1_val = self.q1(o, a)
+        loss_q1 = ((q1_val - backup) ** 2).mean()
 
-        # Actor
-        for p in self.q.parameters():
-            p.requires_grad = False
-        loss_pi = -self.q(o, self.pi(o)).mean()
-        self.pi_optim.zero_grad()
-        loss_pi.backward()
-        grad_pi = _grad_norm(self.pi)
-        self.pi_optim.step()
-        for p in self.q.parameters():
-            p.requires_grad = True
+        self.q1_optim.zero_grad()
+        loss_q1.backward()
+        grad_q1 = _grad_norm(self.q1)
+        self.q1_optim.step()
 
-        # Polyak
-        with torch.no_grad():
-            for p, pt in zip(self.pi.parameters(), self.pi_targ.parameters()):
-                pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
-            for p, pt in zip(self.q.parameters(), self.q_targ.parameters()):
-                pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+        # Q2
+        q2_val = self.q2(o, a)
+        loss_q2 = ((q2_val - backup) ** 2).mean()
 
-        return {
-            "loss_q": loss_q.item(),
-            "loss_pi": loss_pi.item(),
-            "q_val": q_val.mean().item(),
-            "grad_q": grad_q,
-            "grad_pi": grad_pi,
+        self.q2_optim.zero_grad()
+        loss_q2.backward()
+        grad_q2 = _grad_norm(self.q2)
+        self.q2_optim.step()
+
+        metrics = {
+            "loss_q1": loss_q1.item(),
+            "loss_q2": loss_q2.item(),
+            "q1_val": q1_val.mean().item(),
+            "q2_val": q2_val.mean().item(),
+            "grad_q1": grad_q1,
+            "grad_q2": grad_q2,
         }
+
+        # ---- Delayed actor update ----
+        self._update_count += 1
+        if self._update_count % self.policy_delay == 0:
+            for p in self.q1.parameters():
+                p.requires_grad = False
+            loss_pi = -self.q1(o, self.pi(o)).mean()
+            self.pi_optim.zero_grad()
+            loss_pi.backward()
+            grad_pi = _grad_norm(self.pi)
+            self.pi_optim.step()
+            for p in self.q1.parameters():
+                p.requires_grad = True
+
+            metrics["loss_pi"] = loss_pi.item()
+            metrics["grad_pi"] = grad_pi
+
+            # Polyak update targets (only when policy is updated)
+            with torch.no_grad():
+                for p, pt in zip(self.pi.parameters(), self.pi_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                for p, pt in zip(self.q1.parameters(), self.q1_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                for p, pt in zip(self.q2.parameters(), self.q2_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+
+        return metrics
 
     # ------------------------------------------------------------------
     def train(self, epochs: Optional[int] = None) -> None:
@@ -220,8 +275,10 @@ class DDPGAgent:
         if not os.path.isfile(metrics_csv):
             with open(metrics_csv, "w", newline="") as f:
                 csv.writer(f).writerow([
-                    "epoch", "step", "loss_q", "loss_pi", "q_val",
-                    "grad_q", "grad_pi", "mean_return", "mean_length",
+                    "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
+                    "q1_val", "q2_val",
+                    "grad_q1", "grad_q2", "grad_pi",
+                    "mean_return", "mean_length",
                     "episodes", "buffer_size", "elapsed_s",
                 ])
 
@@ -314,27 +371,33 @@ class DDPGAgent:
                     avg = {k: np.mean(v)
                            for k, v in epoch_metrics.items() if v}
 
-                    print(f"\n[DDPGAgent] Epoch {epoch}/{epochs}  "
+                    print(f"\n[TD3Agent] Epoch {epoch}/{epochs}  "
                           f"elapsed={elapsed:.0f}s  "
                           f"buf={len(self.buffer)}")
                     print(f"  return   {mean_ret:>8.1f}  "
                           f"(episodes={len(epoch_returns)}  "
                           f"mean_len={mean_len:.0f})")
                     if avg:
-                        print(f"  loss_q   {avg.get('loss_q', 0):>10.4f}   "
-                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}   "
-                              f"Q_val  {avg.get('q_val', 0):>8.2f}")
-                        print(f"  grad_q   {avg.get('grad_q', 0):>10.4f}   "
+                        print(f"  loss_q1  {avg.get('loss_q1', 0):>10.4f}   "
+                              f"loss_q2  {avg.get('loss_q2', 0):>10.4f}   "
+                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}")
+                        print(f"  Q1_val   {avg.get('q1_val', 0):>10.2f}   "
+                              f"Q2_val   {avg.get('q2_val', 0):>10.2f}")
+                        print(f"  grad_q1  {avg.get('grad_q1', 0):>10.4f}   "
+                              f"grad_q2  {avg.get('grad_q2', 0):>10.4f}   "
                               f"grad_pi  {avg.get('grad_pi', 0):>10.4f}")
 
                     # Log to metrics CSV
                     with open(metrics_csv, "a", newline="") as f:
                         csv.writer(f).writerow([
                             epoch, global_step,
-                            f"{avg.get('loss_q', ''):.6f}" if avg else "",
+                            f"{avg.get('loss_q1', ''):.6f}" if avg else "",
+                            f"{avg.get('loss_q2', ''):.6f}" if avg else "",
                             f"{avg.get('loss_pi', ''):.6f}" if avg else "",
-                            f"{avg.get('q_val', ''):.4f}" if avg else "",
-                            f"{avg.get('grad_q', ''):.4f}" if avg else "",
+                            f"{avg.get('q1_val', ''):.4f}" if avg else "",
+                            f"{avg.get('q2_val', ''):.4f}" if avg else "",
+                            f"{avg.get('grad_q1', ''):.4f}" if avg else "",
+                            f"{avg.get('grad_q2', ''):.4f}" if avg else "",
                             f"{avg.get('grad_pi', ''):.4f}" if avg else "",
                             f"{mean_ret:.2f}" if not np.isnan(
                                 mean_ret) else "",
@@ -368,30 +431,39 @@ class DDPGAgent:
         path = path or os.path.join(self.log_dir, "checkpoints")
         os.makedirs(path, exist_ok=True)
         torch.save(self.pi.state_dict(), os.path.join(path, "pi.pt"))
-        torch.save(self.q.state_dict(), os.path.join(path, "q.pt"))
+        torch.save(self.q1.state_dict(), os.path.join(path, "q1.pt"))
+        torch.save(self.q2.state_dict(), os.path.join(path, "q2.pt"))
         print(f"  [saved] {path}")
 
     def load(self, path: str) -> None:
         self.pi.load_state_dict(torch.load(os.path.join(
             path, "pi.pt"), map_location=self.device))
-        self.q.load_state_dict(torch.load(os.path.join(
-            path, "q.pt"), map_location=self.device))
+        self.q1.load_state_dict(torch.load(os.path.join(
+            path, "q1.pt"), map_location=self.device))
+        self.q2.load_state_dict(torch.load(os.path.join(
+            path, "q2.pt"), map_location=self.device))
         self.pi_targ = deepcopy(self.pi)
-        self.q_targ = deepcopy(self.q)
+        self.q1_targ = deepcopy(self.q1)
+        self.q2_targ = deepcopy(self.q2)
         print(f"  [loaded] {path}")
 
 
 # ======================================================================
-# AdversarialDDPGAgent — zero-sum game: pi_rob vs pi_adv
+# AdversarialTD3Agent — zero-sum game: pi_rob vs pi_adv
 # ======================================================================
-class AdversarialDDPGAgent:
+class AdversarialTD3Agent:
     """
-    Two-player zero-sum adversarial DDPG.
+    Two-player zero-sum adversarial TD3.
 
     The *controller* (pi_rob) maximises cumulative reward.
     The *adversary* (pi_adv) minimises it (gradient flip).
     Optionally trains a transformer disturbance detector and uses it
-    to blend pi_opt (from a separately-trained DDPGAgent) with pi_rob.
+    to blend pi_opt (from a separately-trained TD3Agent) with pi_rob.
+
+    TD3 improvements over DDPG:
+        - Twin Q-networks (clipped double Q-learning)
+        - Delayed policy updates (every ``policy_delay`` critic updates)
+        - Target policy smoothing (clipped noise on target actions)
     """
 
     def __init__(
@@ -432,6 +504,10 @@ class AdversarialDDPGAgent:
         # pre-trained optimal policy (for blending)
         pi_opt_path: Optional[str] = None,
         num_envs: int = 1,
+        # TD3-specific
+        policy_delay: int = 2,
+        target_noise: float = 0.2,
+        noise_clip: float = 0.5,
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -451,21 +527,25 @@ class AdversarialDDPGAgent:
         self.act_limit = float(self.envs.single_action_space.high[0])
         self.dist_limit = self.act_limit * disturbance_ratio
 
-        # ---- networks ----
+        # ---- networks: twin Q-functions ----
         self.pi_rob = MLPActor(
             obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
         self.pi_adv = MLPActor(
             obs_dim, act_dim, hidden_sizes, activation, self.dist_limit).to(self.device)
-        self.q = AdversarialMLPQFunction(
+        self.q1 = AdversarialMLPQFunction(
+            obs_dim, act_dim, act_dim, hidden_sizes, activation).to(self.device)
+        self.q2 = AdversarialMLPQFunction(
             obs_dim, act_dim, act_dim, hidden_sizes, activation).to(self.device)
 
         # targets
         self.pi_rob_targ = deepcopy(self.pi_rob)
         self.pi_adv_targ = deepcopy(self.pi_adv)
-        self.q_targ = deepcopy(self.q)
+        self.q1_targ = deepcopy(self.q1)
+        self.q2_targ = deepcopy(self.q2)
         for p in (list(self.pi_rob_targ.parameters())
                   + list(self.pi_adv_targ.parameters())
-                  + list(self.q_targ.parameters())):
+                  + list(self.q1_targ.parameters())
+                  + list(self.q2_targ.parameters())):
             p.requires_grad = False
 
         # optional optimal policy
@@ -480,12 +560,13 @@ class AdversarialDDPGAgent:
             self.pi_opt.eval()
             for p in self.pi_opt.parameters():
                 p.requires_grad = False
-            print(f"[AdversarialDDPG] Loaded pi_opt from {pi_opt_path}")
+            print(f"[AdversarialTD3] Loaded pi_opt from {pi_opt_path}")
 
         # ---- optimizers ----
         self.pi_rob_optim = Adam(self.pi_rob.parameters(), lr=pi_lr)
         self.pi_adv_optim = Adam(self.pi_adv.parameters(), lr=pi_lr)
-        self.q_optim = Adam(self.q.parameters(), lr=q_lr)
+        self.q1_optim = Adam(self.q1.parameters(), lr=q_lr)
+        self.q2_optim = Adam(self.q2.parameters(), lr=q_lr)
 
         # ---- replay buffer ----
         self.buffer = ReplayBuffer(
@@ -514,6 +595,12 @@ class AdversarialDDPGAgent:
         self.save_freq = save_freq
         self.disturbance_ratio = disturbance_ratio
         self.disturbance_probability = disturbance_probability
+
+        # TD3-specific
+        self.policy_delay = policy_delay
+        self.target_noise = target_noise
+        self.noise_clip = noise_clip
+        self._update_count = 0
 
         # ---- logging ----
         self.log_dir = log_dir
@@ -545,9 +632,10 @@ class AdversarialDDPGAgent:
             )
             self._transformer_data: list[dict] = []
 
-        print(f"[AdversarialDDPG] device={self.device}  num_envs={num_envs}  "
+        print(f"[AdversarialTD3] device={self.device}  num_envs={num_envs}  "
               f"pi_rob={count_vars(self.pi_rob)}  pi_adv={count_vars(self.pi_adv)}  "
-              f"q={count_vars(self.q)}")
+              f"q1={count_vars(self.q1)}  q2={count_vars(self.q2)}  "
+              f"policy_delay={policy_delay}")
 
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -582,63 +670,96 @@ class AdversarialDDPGAgent:
         a_ctrl = batch.act[:, : self.act_dim]
         a_dist = batch.act[:, self.act_dim:]
 
-        # ---- critic ----
+        # ---- critic update (both Q1 and Q2) ----
         with torch.no_grad():
+            # Target policy smoothing
             a2_ctrl = self.pi_rob_targ(o2)
+            eps_ctrl = torch.randn_like(a2_ctrl) * self.target_noise
+            eps_ctrl = eps_ctrl.clamp(-self.noise_clip, self.noise_clip)
+            a2_ctrl = (a2_ctrl + eps_ctrl).clamp(-self.act_limit, self.act_limit)
+
             a2_dist = self.pi_adv_targ(o2)
-            q_next = self.q_targ(o2, a2_ctrl, a2_dist)
+            eps_dist = torch.randn_like(a2_dist) * self.target_noise
+            eps_dist = eps_dist.clamp(-self.noise_clip, self.noise_clip)
+            a2_dist = (a2_dist + eps_dist).clamp(-self.dist_limit, self.dist_limit)
+
+            # Clipped double Q-learning
+            q1_next = self.q1_targ(o2, a2_ctrl, a2_dist)
+            q2_next = self.q2_targ(o2, a2_ctrl, a2_dist)
+            q_next = torch.min(q1_next, q2_next)
             backup = r + self.gamma * (1.0 - d) * q_next
-        q_val = self.q(o, a_ctrl, a_dist)
-        loss_q = ((q_val - backup) ** 2).mean()
 
-        self.q_optim.zero_grad()
-        loss_q.backward()
-        grad_q = _grad_norm(self.q)
-        self.q_optim.step()
+        # Q1
+        q1_val = self.q1(o, a_ctrl, a_dist)
+        loss_q1 = ((q1_val - backup) ** 2).mean()
 
-        # ---- actor + adversary (gradient flip) ----
-        for p in self.q.parameters():
-            p.requires_grad = False
+        self.q1_optim.zero_grad()
+        loss_q1.backward()
+        grad_q1 = _grad_norm(self.q1)
+        self.q1_optim.step()
 
-        a_rob = self.pi_rob(o)
-        a_adv = self.pi_adv(o)
-        q_for_actors = self.q(o, a_rob, a_adv)
+        # Q2
+        q2_val = self.q2(o, a_ctrl, a_dist)
+        loss_q2 = ((q2_val - backup) ** 2).mean()
 
-        loss_pi = -q_for_actors.mean()
-        self.pi_rob_optim.zero_grad()
-        self.pi_adv_optim.zero_grad()
-        loss_pi.backward()
+        self.q2_optim.zero_grad()
+        loss_q2.backward()
+        grad_q2 = _grad_norm(self.q2)
+        self.q2_optim.step()
 
-        grad_pi_rob = _grad_norm(self.pi_rob)
-        grad_pi_adv = _grad_norm(self.pi_adv)
-
-        for p in self.pi_adv.parameters():
-            if p.grad is not None:
-                p.grad.mul_(-1.0)
-
-        self.pi_rob_optim.step()
-        self.pi_adv_optim.step()
-
-        for p in self.q.parameters():
-            p.requires_grad = True
-
-        # ---- polyak ----
-        with torch.no_grad():
-            for p, pt in zip(self.pi_rob.parameters(), self.pi_rob_targ.parameters()):
-                pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
-            for p, pt in zip(self.pi_adv.parameters(), self.pi_adv_targ.parameters()):
-                pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
-            for p, pt in zip(self.q.parameters(), self.q_targ.parameters()):
-                pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
-
-        return {
-            "loss_q": loss_q.item(),
-            "loss_pi": loss_pi.item(),
-            "q_val": q_val.mean().item(),
-            "grad_q": grad_q,
-            "grad_pi_rob": grad_pi_rob,
-            "grad_pi_adv": grad_pi_adv,
+        metrics = {
+            "loss_q1": loss_q1.item(),
+            "loss_q2": loss_q2.item(),
+            "q1_val": q1_val.mean().item(),
+            "q2_val": q2_val.mean().item(),
+            "grad_q1": grad_q1,
+            "grad_q2": grad_q2,
         }
+
+        # ---- delayed actor + adversary update (gradient flip) ----
+        self._update_count += 1
+        if self._update_count % self.policy_delay == 0:
+            for p in self.q1.parameters():
+                p.requires_grad = False
+
+            a_rob = self.pi_rob(o)
+            a_adv = self.pi_adv(o)
+            q_for_actors = self.q1(o, a_rob, a_adv)
+
+            loss_pi = -q_for_actors.mean()
+            self.pi_rob_optim.zero_grad()
+            self.pi_adv_optim.zero_grad()
+            loss_pi.backward()
+
+            grad_pi_rob = _grad_norm(self.pi_rob)
+            grad_pi_adv = _grad_norm(self.pi_adv)
+
+            for p in self.pi_adv.parameters():
+                if p.grad is not None:
+                    p.grad.mul_(-1.0)
+
+            self.pi_rob_optim.step()
+            self.pi_adv_optim.step()
+
+            for p in self.q1.parameters():
+                p.requires_grad = True
+
+            metrics["loss_pi"] = loss_pi.item()
+            metrics["grad_pi_rob"] = grad_pi_rob
+            metrics["grad_pi_adv"] = grad_pi_adv
+
+            # ---- polyak update targets (only when policy is updated) ----
+            with torch.no_grad():
+                for p, pt in zip(self.pi_rob.parameters(), self.pi_rob_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                for p, pt in zip(self.pi_adv.parameters(), self.pi_adv_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                for p, pt in zip(self.q1.parameters(), self.q1_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                for p, pt in zip(self.q2.parameters(), self.q2_targ.parameters()):
+                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+
+        return metrics
 
     # ------------------------------------------------------------------
     def _collect_detector_data(
@@ -682,8 +803,9 @@ class AdversarialDDPGAgent:
         # Metrics CSV
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
         metrics_header = [
-            "epoch", "step", "loss_q", "loss_pi", "q_val",
-            "grad_q", "grad_pi_rob", "grad_pi_adv",
+            "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
+            "q1_val", "q2_val",
+            "grad_q1", "grad_q2", "grad_pi_rob", "grad_pi_adv",
             "mean_return", "mean_length", "episodes",
             "dist_episodes", "buffer_size", "elapsed_s",
         ]
@@ -838,7 +960,7 @@ class AdversarialDDPGAgent:
                     avg_det = {k: np.mean(v)
                                for k, v in epoch_det_metrics.items() if v}
 
-                    print(f"\n[AdversarialDDPG] Epoch {epoch}/{epochs}  "
+                    print(f"\n[AdversarialTD3] Epoch {epoch}/{epochs}  "
                           f"elapsed={elapsed:.0f}s  "
                           f"buf={len(self.buffer)}")
                     print(f"  return   {mean_ret:>8.1f}  "
@@ -846,10 +968,12 @@ class AdversarialDDPGAgent:
                           f"dist={epoch_dist_eps}  "
                           f"mean_len={mean_len:.0f})")
                     if avg:
-                        print(f"  loss_q   {avg.get('loss_q', 0):>10.4f}   "
-                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}   "
-                              f"Q_val  {avg.get('q_val', 0):>8.2f}")
-                        print(f"  grad_q   {avg.get('grad_q', 0):>10.4f}   "
+                        print(f"  loss_q1  {avg.get('loss_q1', 0):>10.4f}   "
+                              f"loss_q2  {avg.get('loss_q2', 0):>10.4f}   "
+                              f"loss_pi  {avg.get('loss_pi', 0):>10.4f}")
+                        print(f"  Q1_val   {avg.get('q1_val', 0):>10.2f}   "
+                              f"Q2_val   {avg.get('q2_val', 0):>10.2f}")
+                        print(f"  grad_q1  {avg.get('grad_q1', 0):>10.4f}   "
                               f"grad_rob {avg.get('grad_pi_rob', 0):>10.4f}   "
                               f"grad_adv {avg.get('grad_pi_adv', 0):>8.4f}")
                     if avg_det:
@@ -860,10 +984,13 @@ class AdversarialDDPGAgent:
                     # Log to metrics CSV
                     row = [
                         epoch, global_step,
-                        f"{avg.get('loss_q', ''):.6f}" if avg else "",
+                        f"{avg.get('loss_q1', ''):.6f}" if avg else "",
+                        f"{avg.get('loss_q2', ''):.6f}" if avg else "",
                         f"{avg.get('loss_pi', ''):.6f}" if avg else "",
-                        f"{avg.get('q_val', ''):.4f}" if avg else "",
-                        f"{avg.get('grad_q', ''):.4f}" if avg else "",
+                        f"{avg.get('q1_val', ''):.4f}" if avg else "",
+                        f"{avg.get('q2_val', ''):.4f}" if avg else "",
+                        f"{avg.get('grad_q1', ''):.4f}" if avg else "",
+                        f"{avg.get('grad_q2', ''):.4f}" if avg else "",
                         f"{avg.get('grad_pi_rob', ''):.4f}" if avg else "",
                         f"{avg.get('grad_pi_adv', ''):.4f}" if avg else "",
                         f"{mean_ret:.2f}" if not np.isnan(mean_ret) else "",
@@ -908,7 +1035,8 @@ class AdversarialDDPGAgent:
         os.makedirs(path, exist_ok=True)
         torch.save(self.pi_rob.state_dict(), os.path.join(path, "pi_rob.pt"))
         torch.save(self.pi_adv.state_dict(), os.path.join(path, "pi_adv.pt"))
-        torch.save(self.q.state_dict(), os.path.join(path, "q.pt"))
+        torch.save(self.q1.state_dict(), os.path.join(path, "q1.pt"))
+        torch.save(self.q2.state_dict(), os.path.join(path, "q2.pt"))
         if self.use_transformer:
             torch.save(self.detector.state_dict(),
                        os.path.join(path, "detector.pt"))
@@ -919,11 +1047,14 @@ class AdversarialDDPGAgent:
             path, "pi_rob.pt"), map_location=self.device))
         self.pi_adv.load_state_dict(torch.load(os.path.join(
             path, "pi_adv.pt"), map_location=self.device))
-        self.q.load_state_dict(torch.load(os.path.join(
-            path, "q.pt"), map_location=self.device))
+        self.q1.load_state_dict(torch.load(os.path.join(
+            path, "q1.pt"), map_location=self.device))
+        self.q2.load_state_dict(torch.load(os.path.join(
+            path, "q2.pt"), map_location=self.device))
         self.pi_rob_targ = deepcopy(self.pi_rob)
         self.pi_adv_targ = deepcopy(self.pi_adv)
-        self.q_targ = deepcopy(self.q)
+        self.q1_targ = deepcopy(self.q1)
+        self.q2_targ = deepcopy(self.q2)
         if self.use_transformer:
             det_path = os.path.join(path, "detector.pt")
             if os.path.isfile(det_path):

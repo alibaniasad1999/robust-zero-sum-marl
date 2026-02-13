@@ -1,3 +1,3 @@
-from .ddpg import DDPGAgent, AdversarialDDPGAgent
+from .td3 import TD3Agent, AdversarialTD3Agent
 
-__all__ = ["DDPGAgent", "AdversarialDDPGAgent"]
+__all__ = ["TD3Agent", "AdversarialTD3Agent"]

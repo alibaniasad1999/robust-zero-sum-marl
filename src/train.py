@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Entry-point for training DDPG agents.
+Entry-point for training TD3 agents.
 
 Usage:
     # Phase 1 — train optimal policy on nominal environment
@@ -25,7 +25,7 @@ import os
 
 import gymnasium as gym
 
-from src.agents.ddpg import DDPGAgent, AdversarialDDPGAgent
+from src.agents.td3 import TD3Agent, AdversarialTD3Agent
 
 
 def make_env(env_name: str):
@@ -35,7 +35,7 @@ def make_env(env_name: str):
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Train DDPG agents")
+    p = argparse.ArgumentParser(description="Train TD3 agents")
     p.add_argument("--env", type=str, default="Ant-v5", help="Gymnasium env id")
     p.add_argument("--mode", choices=["nominal", "adversarial"], default="nominal")
     p.add_argument("--seed", type=int, default=0)
@@ -63,7 +63,7 @@ def main() -> None:
     log_dir = os.path.join(base_log_dir, f"seed_{args.seed}")
 
     if args.mode == "nominal":
-        agent = DDPGAgent(
+        agent = TD3Agent(
             env_fn,
             seed=args.seed,
             epochs=args.epochs,
@@ -76,7 +76,7 @@ def main() -> None:
             log_dir=log_dir,
         )
     else:
-        agent = AdversarialDDPGAgent(
+        agent = AdversarialTD3Agent(
             env_fn,
             seed=args.seed,
             epochs=args.epochs,

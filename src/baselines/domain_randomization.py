@@ -1,7 +1,7 @@
 """
 Domain Randomization (DR) baseline.
 
-Trains a standard DDPG policy on environments with randomised physical
+Trains a standard TD3 policy on environments with randomised physical
 parameters (mass, friction, damping) each episode.  No adversary, no
 transformer detector — robustness comes purely from seeing diverse dynamics.
 
@@ -20,7 +20,7 @@ from typing import Any, Tuple
 import gymnasium as gym
 import numpy as np
 
-from src.agents.ddpg import DDPGAgent
+from src.agents.td3 import TD3Agent
 
 
 class DomainRandomizationWrapper(gym.Wrapper):
@@ -114,7 +114,7 @@ def main() -> None:
             damping_range=dr_,
         )
 
-    agent = DDPGAgent(
+    agent = TD3Agent(
         env_fn,
         seed=args.seed,
         epochs=args.epochs,
