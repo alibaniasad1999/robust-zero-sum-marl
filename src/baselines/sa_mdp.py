@@ -1,7 +1,7 @@
 """
 SA-MDP (State-Adversarial MDP) baseline.
 
-Trains a standard DDPG policy with worst-case ℓ∞ bounded observation
+Trains a standard TD3 policy with worst-case ℓ∞ bounded observation
 perturbations applied during training.  At test time the policy is used
 without perturbation — robustness comes from having trained against
 adversarial state noise.
@@ -25,11 +25,11 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from src.agents.ddpg import DDPGAgent, _make_vec_env
+from src.agents.td3 import TD3Agent, _make_vec_env
 
 
-class SAMDPAgent(DDPGAgent):
-    """DDPGAgent with ℓ∞ state-adversarial perturbation during training.
+class SAMDPAgent(TD3Agent):
+    """TD3Agent with ℓ∞ state-adversarial perturbation during training.
 
     During the training loop, observations fed to the policy are perturbed
     by a worst-case noise bounded in ℓ∞ norm::
@@ -41,7 +41,7 @@ class SAMDPAgent(DDPGAgent):
 
     Args:
         eps: ℓ∞ perturbation radius (default 0.05).
-        All other args are forwarded to ``DDPGAgent``.
+        All other args are forwarded to ``TD3Agent``.
     """
 
     def __init__(self, env_fn, *, eps: float = 0.05, **kwargs):
@@ -55,7 +55,7 @@ class SAMDPAgent(DDPGAgent):
         return obs + noise
 
     def train(self, epochs: Optional[int] = None) -> None:
-        """SA-MDP training loop — same as DDPG but perturbs obs for action selection."""
+        """SA-MDP training loop — same as TD3 but perturbs obs for action selection."""
         epochs = epochs or self.epochs
         N = self.num_envs
 

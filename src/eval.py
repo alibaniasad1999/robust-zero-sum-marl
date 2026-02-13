@@ -120,7 +120,7 @@ def load_vanilla_policy(
     ckpt_dir: str, env_id: str, device: torch.device,
     hidden_sizes: Tuple[int, ...] = (256, 256),
 ) -> Callable[[np.ndarray], np.ndarray]:
-    """Load a DDPGAgent (vanilla / SA-MDP / DR) policy."""
+    """Load a TD3Agent (vanilla / SA-MDP / DR) policy."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
     pi = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
     pi.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi.pt"),
@@ -139,7 +139,7 @@ def load_rarl_policy(
     ckpt_dir: str, env_id: str, device: torch.device,
     hidden_sizes: Tuple[int, ...] = (256, 256),
 ) -> Callable[[np.ndarray], np.ndarray]:
-    """Load an AdversarialDDPGAgent and use only pi_rob (no detector)."""
+    """Load an AdversarialTD3Agent and use only pi_rob (no detector)."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
     pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
     pi_rob.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),

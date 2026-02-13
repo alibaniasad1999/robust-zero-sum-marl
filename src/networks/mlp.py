@@ -1,4 +1,4 @@
-"""MLP network building blocks for DDPG actor-critic architectures."""
+"""MLP network building blocks for TD3 actor-critic architectures."""
 
 from typing import List, Optional, Type
 
