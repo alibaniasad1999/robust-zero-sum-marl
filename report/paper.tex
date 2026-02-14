@@ -1753,6 +1753,69 @@ Future work will proceed along several directions:
 \end{enumerate}
 
 % ===========================================================================
+\appendix
+\section{Hyperparameter Settings}\label{app:hyperparams}
+% ===========================================================================
+
+Table~\ref{tab:hyperparams} lists the hyperparameters used for all TD3-based
+agents. Both the nominal agent (TD3) and the adversarial agents (RARL, RZSM)
+share the same base settings.  SA-MDP and Domain Randomization use the
+nominal TD3 agent with their respective training-time perturbations.
+
+\begin{table}[h]
+\centering
+\caption{TD3 Hyperparameters}
+\label{tab:hyperparams}
+\begin{tabular}{lcc}
+\hline
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} \\
+\hline
+\multicolumn{3}{l}{\textit{Network Architecture}} \\
+Hidden layers & -- & 2 \\
+Hidden units per layer & -- & 256 \\
+Hidden activation & -- & ReLU \\
+Output activation (actor) & -- & Tanh \\
+\hline
+\multicolumn{3}{l}{\textit{Optimization}} \\
+Actor learning rate & $\eta_\pi$ & $3 \times 10^{-4}$ \\
+Critic learning rate & $\eta_Q$ & $3 \times 10^{-4}$ \\
+Batch size & $B$ & 256 \\
+Replay buffer size & $|\mathcal{D}|$ & $10^6$ \\
+Discount factor & $\gamma$ & 0.99 \\
+Polyak averaging & $\tau$ & 0.005 \\
+\hline
+\multicolumn{3}{l}{\textit{TD3-Specific}} \\
+Policy delay & $d$ & 2 \\
+Target policy noise & $\tilde{\sigma}$ & 0.2 \\
+Target noise clip & $c$ & 0.5 \\
+Exploration noise & $\sigma$ & 0.1 \\
+\hline
+\multicolumn{3}{l}{\textit{Training Schedule}} \\
+Random exploration steps & -- & 25{,}000 \\
+Updates start after & -- & 25{,}000 steps \\
+Update interval & -- & every 50 env steps \\
+Gradient steps per update & -- & 50 \\
+Steps per epoch & -- & 4{,}000 \\
+Total epochs & -- & 250 \\
+Parallel environments & -- & 10 \\
+Seeds per method & -- & 5 \\
+\hline
+\multicolumn{3}{l}{\textit{Adversarial (RARL / RZSM)}} \\
+Disturbance ratio & $\delta_{\max}$ & 0.1 \\
+Disturbance probability & $p_{\mathrm{dist}}$ & 0.5 \\
+\hline
+\multicolumn{3}{l}{\textit{Transformer Detector (RZSM only)}} \\
+Sequence length & $L$ & 20 \\
+Model dimension & $d_{\mathrm{model}}$ & 128 \\
+Attention heads & $H$ & 4 \\
+Encoder layers & $N_L$ & 3 \\
+Detector learning rate & $\eta_{\mathrm{det}}$ & $1 \times 10^{-4}$ \\
+Detector train interval & -- & every 500 steps \\
+\hline
+\end{tabular}
+\end{table}
+
+% ===========================================================================
 % Bibliography
 % ===========================================================================
 \bibliographystyle{IEEEtran}
