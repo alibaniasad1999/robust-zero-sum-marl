@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Simple training runner — train all methods for one environment.
 #
+# Logs are saved with auto-incrementing run numbers:
+#   logs/Ant_v5/run_0/{vanilla,rarl,...}/seed_*/
+#   logs/Ant_v5/run_1/{vanilla,rarl,...}/seed_*/
+#
 # Usage:
-#   bash scripts/run.sh Ant-v5 250 5 10
-#   bash scripts/run.sh HalfCheetah-v5 100 3 20
-#   bash scripts/run.sh Walker2d-v5 250 5 10
+#   bash scripts/run.sh Ant-v5 250 5 10        # auto-increments run number
+#   bash scripts/run.sh HalfCheetah-v5 100 3 20 2  # forces run_2
 #
 # Arguments:
 #   $1  ENV       Gymnasium environment ID  (default: Ant-v5)
 #   $2  EPOCHS    Number of training epochs  (default: 250)
 #   $3  SEEDS     Number of random seeds     (default: 5)
 #   $4  NUM_ENVS  Parallel vectorized envs   (default: 10)
+#   $5  RUN_NUM   Run number (default: auto-increment)
 
 set -euo pipefail
 
@@ -27,9 +31,31 @@ ENV="${1:-Ant-v5}"
 EPOCHS="${2:-250}"
 SEEDS="${3:-5}"
 NUM_ENVS="${4:-10}"
+RUN_NUM_ARG="${5:-}"
 
 ENV_SAFE="${ENV//-/_}"
-LOG_BASE="logs/${ENV_SAFE}"
+ENV_DIR="logs/${ENV_SAFE}"
+
+# ── Determine run number ────────────────────────────────────────────────
+mkdir -p "$ENV_DIR"
+if [[ -n "$RUN_NUM_ARG" ]]; then
+  # User specified a run number
+  RUN_NUM="$RUN_NUM_ARG"
+else
+  # Auto-increment: find next available
+  RUN_NUM=0
+  for d in "$ENV_DIR"/run_*; do
+    if [[ -d "$d" ]]; then
+      n="${d##*run_}"
+      if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= RUN_NUM )); then
+        RUN_NUM=$(( n + 1 ))
+      fi
+    fi
+  done
+fi
+
+LOG_BASE="${ENV_DIR}/run_${RUN_NUM}"
+mkdir -p "$LOG_BASE"
 
 echo "=========================================="
 echo "  Training Pipeline"
@@ -37,6 +63,7 @@ echo "  Env:      $ENV"
 echo "  Epochs:   $EPOCHS  ($(( EPOCHS * 4000 )) total steps)"
 echo "  Seeds:    $SEEDS"
 echo "  Num envs: $NUM_ENVS"
+echo "  Run:      $RUN_NUM"
 echo "  Log dir:  $LOG_BASE"
 echo "=========================================="
 
@@ -94,6 +121,6 @@ done
 
 echo ""
 echo "=========================================="
-echo "  Training complete!"
+echo "  Training complete!  (run $RUN_NUM)"
 echo "  Checkpoints: ${LOG_BASE}/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/"
 echo "=========================================="

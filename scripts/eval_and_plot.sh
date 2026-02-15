@@ -4,11 +4,12 @@
 # Usage:
 #   bash scripts/eval_and_plot.sh Ant-v5
 #   bash scripts/eval_and_plot.sh HalfCheetah-v5 100
-#   bash scripts/eval_and_plot.sh Walker2d-v5 50
+#   bash scripts/eval_and_plot.sh Walker2d-v5 50 2
 #
 # Arguments:
 #   $1  ENV        Gymnasium environment ID  (default: Ant-v5)
 #   $2  EPISODES   Evaluation episodes per (method, scenario, seed)  (default: 50)
+#   $3  RUN_NUM    Run number to evaluate    (default: 0)
 
 set -euo pipefail
 
@@ -23,15 +24,17 @@ cd "$PROJECT_DIR"
 # ── Arguments ─────────────────────────────────────────────────────────
 ENV="${1:-Ant-v5}"
 EPISODES="${2:-50}"
+RUN_NUM="${3:-0}"
 
 ENV_SAFE="${ENV//-/_}"
-LOG_DIR="logs/${ENV_SAFE}"
+LOG_DIR="logs/${ENV_SAFE}/run_${RUN_NUM}"
 RESULTS_DIR="results/${ENV_SAFE}"
 
 echo "=========================================="
 echo "  Evaluation & Plotting Pipeline"
 echo "  Env:       $ENV"
 echo "  Episodes:  $EPISODES per (method, scenario, seed)"
+echo "  Run:       $RUN_NUM"
 echo "  Log dir:   $LOG_DIR"
 echo "  Output:    $RESULTS_DIR"
 echo "=========================================="
@@ -61,7 +64,7 @@ python scripts/plot_results.py \
 
 echo ""
 echo "=========================================="
-echo "  Done!"
+echo "  Done!  (run $RUN_NUM)"
 echo "  CSVs:    $RESULTS_DIR/comparison_table.csv"
 echo "           $RESULTS_DIR/per_seed_results.csv"
 echo "  Figures: $RESULTS_DIR/figures/"
