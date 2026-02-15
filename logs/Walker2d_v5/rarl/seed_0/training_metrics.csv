@@ -1,0 +1,4 @@
+epoch,step,loss_q,loss_pi,q_val,grad_q,grad_pi_rob,grad_pi_adv,mean_return,mean_length,episodes,dist_episodes,buffer_size,elapsed_s
+1,3900,,,,,,,0.49,19.0,150,68,4000,1.7
+2,7900,,,,,,,3.24,24.5,113,56,8000,3.4
+1,3999,,,,,,,1.85,21.7,184,85,4000,1.2
