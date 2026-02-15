@@ -52,27 +52,76 @@ from src.environments.wrappers import (
 # Scenario factory
 # ======================================================================
 
-SCENARIOS = {
-    "nominal": lambda env: env,
-    "force": lambda env: ExternalForceWrapper(env, force_mag=50.0,
-                                               interval_range=(50, 200)),
-    "params": lambda env: ParameterPerturbationWrapper(env, mass_range=0.3,
-                                                        friction_range=0.3,
-                                                        damping_range=0.3),
-    "noise": lambda env: ObservationNoiseWrapper(env, noise_std=0.05),
-    "combined": lambda env: CombinedDisturbanceWrapper(env, force_mag=50.0,
-                                                        mass_range=0.3,
-                                                        noise_std=0.05),
+# Per-environment disturbance profiles.
+# Simple envs need stronger disturbances to see differentiation.
+_DISTURBANCE_PROFILES: Dict[str, Dict[str, Any]] = {
+    # --- Simple (light / low-DOF) environments ---
+    "InvertedPendulum-v5":       {"force_mag": 200.0, "interval": (10, 50),
+                                  "force_duration": 10,
+                                  "mass_range": 0.7, "friction_range": 0.7,
+                                  "damping_range": 0.7, "noise_std": 0.05},
+    "InvertedDoublePendulum-v5": {"force_mag": 150.0, "interval": (10, 50),
+                                  "force_duration": 10,
+                                  "mass_range": 0.6, "friction_range": 0.6,
+                                  "damping_range": 0.6, "noise_std": 0.05},
+    "Reacher-v5":                {"force_mag": 100.0, "interval": (10, 50),
+                                  "force_duration": 8,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.05},
+    "Pusher-v5":                 {"force_mag": 100.0, "interval": (10, 50),
+                                  "force_duration": 8,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.05},
+    "Swimmer-v5":                {"force_mag": 100.0, "interval": (20, 80),
+                                  "force_duration": 8,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.05},
 }
+
+# Default profile for complex locomotion envs (Ant, Humanoid, etc.)
+_DEFAULT_PROFILE: Dict[str, Any] = {
+    "force_mag": 50.0, "interval": (50, 200),
+    "mass_range": 0.3, "friction_range": 0.3,
+    "damping_range": 0.3, "noise_std": 0.05,
+}
+
+SCENARIO_NAMES = ["nominal", "force", "params", "noise", "combined"]
+
+
+def _get_profile(env_id: str) -> Dict[str, Any]:
+    return _DISTURBANCE_PROFILES.get(env_id, _DEFAULT_PROFILE)
 
 
 def make_scenario_env(env_id: str, scenario: str) -> gym.Env:
     """Create a Gymnasium env with the specified disturbance scenario."""
     env = gym.make(env_id)
-    if scenario not in SCENARIOS:
+    if scenario not in SCENARIO_NAMES:
         raise ValueError(f"Unknown scenario: {scenario}. "
-                         f"Choose from {list(SCENARIOS.keys())}")
-    return SCENARIOS[scenario](env)
+                         f"Choose from {SCENARIO_NAMES}")
+
+    if scenario == "nominal":
+        return env
+
+    p = _get_profile(env_id)
+
+    if scenario == "force":
+        return ExternalForceWrapper(env, force_mag=p["force_mag"],
+                                    interval_range=p["interval"],
+                                    force_duration=p.get("force_duration", 5))
+    elif scenario == "params":
+        return ParameterPerturbationWrapper(env, mass_range=p["mass_range"],
+                                            friction_range=p["friction_range"],
+                                            damping_range=p["damping_range"])
+    elif scenario == "noise":
+        return ObservationNoiseWrapper(env, noise_std=p["noise_std"])
+    elif scenario == "combined":
+        return CombinedDisturbanceWrapper(env, force_mag=p["force_mag"],
+                                          mass_range=p["mass_range"],
+                                          noise_std=p["noise_std"],
+                                          force_duration=p.get("force_duration", 5),
+                                          interval_range=p["interval"])
+
+    raise ValueError(f"Unknown scenario: {scenario}")
 
 
 # ======================================================================
@@ -122,7 +171,7 @@ def load_vanilla_policy(
 ) -> Callable[[np.ndarray], np.ndarray]:
     """Load a TD3Agent (vanilla / SA-MDP / DR) policy."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
-    pi = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
+    pi = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
     pi.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi.pt"),
                                   map_location=device))
     pi.eval()
@@ -141,7 +190,7 @@ def load_rarl_policy(
 ) -> Callable[[np.ndarray], np.ndarray]:
     """Load an AdversarialTD3Agent and use only pi_rob (no detector)."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
-    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
+    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
     pi_rob.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),
                                       map_location=device))
     pi_rob.eval()
@@ -160,16 +209,16 @@ def load_rzsm_policy(
     env_id: str,
     device: torch.device,
     hidden_sizes: Tuple[int, ...] = (256, 256),
-    seq_len: int = 20,
-    d_model: int = 128,
+    seq_len: int = 10,
+    d_model: int = 64,
     nhead: int = 4,
-    num_layers: int = 3,
+    num_layers: int = 2,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], "RZSMPolicyState"]:
     """Load full RZSM: pi_opt + pi_rob + transformer detector with blending."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
 
-    pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
-    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.Tanh, act_limit).to(device)
+    pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
+    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
     detector = TransformerDisturbanceDetector(
         obs_dim, seq_len, d_model, nhead, num_layers,
     ).to(device)
