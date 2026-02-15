@@ -30,7 +30,7 @@ htmlcov/
 .coverage
 
 # Training outputs
-logs/
+# logs/
 
 # LaTeX build artifacts
 report/*.aux
