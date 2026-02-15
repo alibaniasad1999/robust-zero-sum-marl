@@ -269,21 +269,19 @@ class TD3Agent:
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        if not os.path.isfile(self._csv_path):
-            with open(self._csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(["step", "episode_return"])
+        # Overwrite CSVs on each new training run
+        with open(self._csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(["step", "episode_return"])
 
-        # Metrics CSV
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
-        if not os.path.isfile(metrics_csv):
-            with open(metrics_csv, "w", newline="") as f:
-                csv.writer(f).writerow([
-                    "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
-                    "q1_val", "q2_val",
-                    "grad_q1", "grad_q2", "grad_pi",
-                    "mean_return", "mean_length",
-                    "episodes", "buffer_size", "elapsed_s",
-                ])
+        with open(metrics_csv, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
+                "q1_val", "q2_val",
+                "grad_q1", "grad_q2", "grad_pi",
+                "mean_return", "mean_length",
+                "episodes", "buffer_size", "elapsed_s",
+            ])
 
         # Each loop iteration collects N transitions
         total_transitions = self.steps_per_epoch * epochs
@@ -804,12 +802,11 @@ class AdversarialTD3Agent:
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        if not os.path.isfile(self._csv_path):
-            with open(self._csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(
-                    ["step", "episode_return", "has_disturbance"])
+        # Overwrite CSVs on each new training run
+        with open(self._csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(
+                ["step", "episode_return", "has_disturbance"])
 
-        # Metrics CSV
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
         metrics_header = [
             "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
@@ -820,9 +817,8 @@ class AdversarialTD3Agent:
         ]
         if self.use_transformer:
             metrics_header += ["det_loss", "det_dist_loss", "det_alpha_loss"]
-        if not os.path.isfile(metrics_csv):
-            with open(metrics_csv, "w", newline="") as f:
-                csv.writer(f).writerow(metrics_header)
+        with open(metrics_csv, "w", newline="") as f:
+            csv.writer(f).writerow(metrics_header)
 
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N

@@ -59,9 +59,9 @@ class SAMDPAgent(TD3Agent):
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        if not os.path.isfile(self._csv_path):
-            with open(self._csv_path, "w", newline="") as f:
-                csv.writer(f).writerow(["step", "episode_return"])
+        # Overwrite CSV on each new training run
+        with open(self._csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(["step", "episode_return"])
 
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
