@@ -436,10 +436,32 @@ def fig5_performance_drop(df):
     """Fig 5: Performance drop from nominal (waterfall-style)."""
     nominal = df[df["scenario"] == "nominal"].set_index("method")["mean_return"]
 
-    fig, axes = plt.subplots(1, 4, figsize=(7, 2.5), sharey=True)
     disturb_scenarios = [s for s in SCENARIOS if s != "nominal"]
 
-    for ax, scenario in zip(axes, disturb_scenarios):
+    # Pre-compute all drops to find scenarios with actual variation
+    all_drops = {}
+    for scenario in disturb_scenarios:
+        drops = []
+        for method in METHODS:
+            row = df[(df["method"] == method) & (df["scenario"] == scenario)]
+            if len(row) > 0 and method in nominal.index:
+                drops.append(row["mean_return"].values[0] - nominal[method])
+        all_drops[scenario] = drops
+
+    # Filter out scenarios where all drops are zero (no differentiation)
+    active_scenarios = [s for s in disturb_scenarios
+                        if any(abs(d) > 1e-6 for d in all_drops[s])]
+
+    if not active_scenarios:
+        print("  fig5: all scenarios identical to nominal — skipping.")
+        return
+
+    n_panels = len(active_scenarios)
+    fig, axes = plt.subplots(1, n_panels, figsize=(max(3.5, 1.75 * n_panels), 2.5),
+                             sharey=True, squeeze=False)
+    axes = axes[0]
+
+    for ax, scenario in zip(axes, active_scenarios):
         drops = []
         colors_list = []
         labels = []

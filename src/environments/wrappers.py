@@ -34,13 +34,17 @@ class ExternalForceWrapper(gym.Wrapper):
         force_mag: float = 50.0,
         interval_range: Tuple[int, int] = (50, 200),
         torso_body_name: str = "torso",
+        force_duration: int = 5,
     ):
         super().__init__(env)
         self.force_mag = force_mag
         self.interval_range = interval_range
         self.torso_body_name = torso_body_name
+        self.force_duration = force_duration
         self.disturbance_active = False
         self._steps_until_force = 0
+        self._force_steps_left = 0
+        self._current_force: np.ndarray | None = None
         self._torso_id: int | None = None
 
     def _find_torso_id(self) -> int:
@@ -58,29 +62,37 @@ class ExternalForceWrapper(gym.Wrapper):
         self._steps_until_force = self.np_random.integers(
             self.interval_range[0], self.interval_range[1]
         )
+        self._force_steps_left = 0
+        self._current_force = None
         self.disturbance_active = False
         return obs, info
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        self._steps_until_force -= 1
         data = self.unwrapped.data
 
-        if self._steps_until_force <= 0:
-            # Random 3D force direction
-            direction = self.np_random.standard_normal(3)
-            direction /= np.linalg.norm(direction) + 1e-8
-            force = direction * self.force_mag
-            # Apply as wrench: [fx, fy, fz, tx, ty, tz]
-            data.xfrc_applied[self._torso_id, :3] = force
+        if self._force_steps_left > 0:
+            # Continue applying the same force
+            data.xfrc_applied[self._torso_id, :3] = self._current_force
             data.xfrc_applied[self._torso_id, 3:] = 0.0
+            self._force_steps_left -= 1
             self.disturbance_active = True
-            self._steps_until_force = self.np_random.integers(
-                self.interval_range[0], self.interval_range[1]
-            )
         else:
-            # Clear any previously applied force
-            data.xfrc_applied[self._torso_id, :] = 0.0
-            self.disturbance_active = False
+            self._steps_until_force -= 1
+            if self._steps_until_force <= 0:
+                # Start a new force impulse
+                direction = self.np_random.standard_normal(3)
+                direction /= np.linalg.norm(direction) + 1e-8
+                self._current_force = direction * self.force_mag
+                data.xfrc_applied[self._torso_id, :3] = self._current_force
+                data.xfrc_applied[self._torso_id, 3:] = 0.0
+                self._force_steps_left = self.force_duration - 1
+                self.disturbance_active = True
+                self._steps_until_force = self.np_random.integers(
+                    self.interval_range[0], self.interval_range[1]
+                )
+            else:
+                data.xfrc_applied[self._torso_id, :] = 0.0
+                self.disturbance_active = False
 
         obs, rew, term, trunc, info = self.env.step(action)
         info["disturbance_active"] = self.disturbance_active
@@ -209,9 +221,12 @@ class CombinedDisturbanceWrapper(gym.Wrapper):
         friction_range: float = 0.3,
         damping_range: float = 0.3,
         noise_std: float = 0.05,
+        force_duration: int = 5,
+        interval_range: Tuple[int, int] = (50, 200),
     ):
         env = ParameterPerturbationWrapper(env, mass_range, friction_range, damping_range)
-        env = ExternalForceWrapper(env, force_mag)
+        env = ExternalForceWrapper(env, force_mag, interval_range=interval_range,
+                                   force_duration=force_duration)
         env = ObservationNoiseWrapper(env, noise_std)
         super().__init__(env)
         self.disturbance_active = True
