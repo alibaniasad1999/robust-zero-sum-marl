@@ -253,11 +253,14 @@ class TD3Agent:
             # Polyak update targets (only when policy is updated)
             with torch.no_grad():
                 for p, pt in zip(self.pi.parameters(), self.pi_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
                 for p, pt in zip(self.q1.parameters(), self.q1_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
                 for p, pt in zip(self.q2.parameters(), self.q2_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
 
         return metrics
 
@@ -676,12 +679,14 @@ class AdversarialTD3Agent:
             a2_ctrl = self.pi_rob_targ(o2)
             eps_ctrl = torch.randn_like(a2_ctrl) * self.target_noise
             eps_ctrl = eps_ctrl.clamp(-self.noise_clip, self.noise_clip)
-            a2_ctrl = (a2_ctrl + eps_ctrl).clamp(-self.act_limit, self.act_limit)
+            a2_ctrl = (a2_ctrl + eps_ctrl).clamp(-self.act_limit,
+                                                 self.act_limit)
 
             a2_dist = self.pi_adv_targ(o2)
             eps_dist = torch.randn_like(a2_dist) * self.target_noise
             eps_dist = eps_dist.clamp(-self.noise_clip, self.noise_clip)
-            a2_dist = (a2_dist + eps_dist).clamp(-self.dist_limit, self.dist_limit)
+            a2_dist = (a2_dist + eps_dist).clamp(-self.dist_limit,
+                                                 self.dist_limit)
 
             # Clipped double Q-learning
             q1_next = self.q1_targ(o2, a2_ctrl, a2_dist)
@@ -751,13 +756,17 @@ class AdversarialTD3Agent:
             # ---- polyak update targets (only when policy is updated) ----
             with torch.no_grad():
                 for p, pt in zip(self.pi_rob.parameters(), self.pi_rob_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
                 for p, pt in zip(self.pi_adv.parameters(), self.pi_adv_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
                 for p, pt in zip(self.q1.parameters(), self.q1_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
                 for p, pt in zip(self.q2.parameters(), self.q2_targ.parameters()):
-                    pt.data.mul_(self.polyak).add_((1.0 - self.polyak) * p.data)
+                    pt.data.mul_(self.polyak).add_(
+                        (1.0 - self.polyak) * p.data)
 
         return metrics
 
