@@ -1,0 +1,6 @@
+epoch,global_step,device,epoch_wall_s,steps_per_sec,updates_per_sec,env_step_total_s,env_step_mean_ms,buffer_sample_total_s,buffer_sample_mean_ms,update_total_s,update_mean_ms,gpu_mem_allocated_mb,gpu_mem_reserved_mb
+1,3900,GPU (NVIDIA GeForce RTX 3080),0.27,15030.2,0.0,0.190,4.760,0.000,0.000,0.000,0.000,1.5,2.0
+2,7900,GPU (NVIDIA GeForce RTX 3080),0.29,13735.7,0.0,0.193,4.825,0.000,0.000,0.000,0.000,10.6,24.0
+3,11900,GPU (NVIDIA GeForce RTX 3080),1.46,2735.8,342.0,0.192,4.794,0.238,0.476,1.009,2.019,22.6,50.0
+4,15900,GPU (NVIDIA GeForce RTX 3080),1.38,2906.7,363.3,0.201,5.024,0.255,0.510,0.897,1.795,22.6,50.0
+5,19900,GPU (NVIDIA GeForce RTX 3080),0.23,17358.8,0.0,0.207,5.164,0.000,0.000,0.000,0.000,22.6,50.0

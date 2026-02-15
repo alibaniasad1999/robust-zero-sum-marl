@@ -1,0 +1,328 @@
+==========================================
+  Multi-seed training
+  Seeds: 1 | Epochs: 1
+  Env: Swimmer-v5 | Parallel envs: 1
+  Log base: logs/Swimmer_v5
+==========================================
+
+>>> Phase 1: Training vanilla (nominal) policies...
+  [vanilla] seed=0
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=68610  q_params=68865
+
+[DDPGAgent] Epoch 1/1  elapsed=1s  buf=4000
+  return       -2.6  (episodes=3  mean_len=1001)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.5s  steps/s=7866  updates/s=0
+         env_step=0.33s (0.08ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=1MB  reserved=2MB
+  [saved] logs/Swimmer_v5/vanilla/seed_0/checkpoints
+Done.
+
+>>> Phase 2: Training RARL policies...
+  [rarl] seed=0
+[AdversarialDDPG] Loaded pi_opt from logs/Swimmer_v5/vanilla/seed_0/checkpoints
+[AdversarialDDPG] device=cuda  num_envs=1  pi_rob=68610  pi_adv=68610  q=69377
+
+[AdversarialDDPG] Epoch 1/1  elapsed=1s  buf=4000
+  return       -8.0  (episodes=3  dist=0  mean_len=1001)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.5s  steps/s=7750  updates/s=0
+         env_step=0.33s (0.08ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=2MB  reserved=4MB
+  [saved] logs/Swimmer_v5/rarl/seed_0/checkpoints
+Done.
+
+>>> Phase 3: Training SA-MDP policies...
+  [sa_mdp] seed=0
+<frozen runpy>:128: RuntimeWarning: 'src.baselines.sa_mdp' found in sys.modules after import of package 'src.baselines', but prior to execution of 'src.baselines.sa_mdp'; this may result in unpredictable behaviour
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=68610  q_params=68865
+[SA-MDP] eps=0.05
+  step=999  ret=-11.8  len=1000
+  step=2000  ret=11.0  len=1001
+  step=3001  ret=-3.8  len=1001
+[SA-MDP] Epoch 1/1  elapsed=1s
+  [saved] logs/Swimmer_v5/sa_mdp/seed_0/checkpoints
+Done.
+
+>>> Phase 4: Training Domain Randomization policies...
+  [dr] seed=0
+<frozen runpy>:128: RuntimeWarning: 'src.baselines.domain_randomization' found in sys.modules after import of package 'src.baselines', but prior to execution of 'src.baselines.domain_randomization'; this may result in unpredictable behaviour
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=68610  q_params=68865
+
+[DDPGAgent] Epoch 1/1  elapsed=0s  buf=4000
+  return       -0.4  (episodes=3  mean_len=1001)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.4s  steps/s=9066  updates/s=0
+         env_step=0.29s (0.07ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=1MB  reserved=2MB
+  [saved] logs/Swimmer_v5/dr/seed_0/checkpoints
+Done.
+
+>>> Phase 5: Training RZSM policies...
+  [rzsm] seed=0
+[AdversarialDDPG] Loaded pi_opt from logs/Swimmer_v5/vanilla/seed_0/checkpoints
+[AdversarialDDPG] device=cuda  num_envs=1  pi_rob=68610  pi_adv=68610  q=69377
+
+[AdversarialDDPG] Epoch 1/1  elapsed=1s  buf=4000
+  return       -1.5  (episodes=3  dist=0  mean_len=1001)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=1.1s  steps/s=3511  updates/s=0
+         env_step=0.71s (0.18ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=3MB  reserved=4MB
+  [saved] logs/Swimmer_v5/rzsm/seed_0/checkpoints
+Done.
+
+==========================================
+  Training complete!
+  Checkpoints: logs/Swimmer_v5/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/
+==========================================
+
+>>> Phase 6: Running evaluation...
+
+============================================================
+  Method: vanilla
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -18.5 +/- 5.7  len = 1000  (74.9s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -16.2 +/- 11.3  len = 1000  (75.7s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -19.0 +/- 7.8  len = 1000  (55.0s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -19.7 +/- 5.8  len = 1000  (41.4s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -11.9 +/- 9.8  len = 1000  (38.4s)
+
+============================================================
+  Method: rarl
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -18.9 +/- 5.5  len = 1000  (38.6s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -17.1 +/- 9.1  len = 1000  (37.3s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -15.3 +/- 6.8  len = 1000  (37.1s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -17.7 +/- 5.7  len = 1000  (38.5s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -15.9 +/- 10.8  len = 1000  (38.2s)
+
+============================================================
+  Method: sa_mdp
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -18.6 +/- 5.4  len = 1000  (38.1s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -14.5 +/- 9.7  len = 1000  (39.7s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -19.7 +/- 7.0  len = 1000  (40.5s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -16.9 +/- 6.1  len = 1000  (44.6s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -20.7 +/- 10.0  len = 1000  (42.0s)
+
+============================================================
+  Method: dr
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -17.3 +/- 5.2  len = 1000  (41.2s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -15.8 +/- 8.5  len = 1000  (41.0s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -17.5 +/- 7.3  len = 1000  (45.2s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -18.7 +/- 5.2  len = 1000  (46.1s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -12.2 +/- 8.1  len = 1000  (46.3s)
+
+============================================================
+  Method: rzsm
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -18.5 +/- 5.3  len = 1000  (120.2s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -15.4 +/- 10.0  len = 1000  (94.4s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -16.7 +/- 6.7  len = 1000  (96.0s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -19.2 +/- 5.4  len = 1000  (94.7s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -15.8 +/- 9.2  len = 1000  (93.4s)
+Saved: results/Swimmer_v5/comparison_table.csv
+Saved: results/Swimmer_v5/per_seed_results.csv
+Saved: results/Swimmer_v5/detection_metrics.json
+
+======================================================================
+  RESULTS: Swimmer-v5  (aggregated across seeds)
+======================================================================
+Method       Scenario           Return   Length  Seeds
+--------------------------------------------------------
+vanilla      nominal         -18.5±0.0     1000     1
+vanilla      force           -16.2±0.0     1000     1
+vanilla      params          -19.0±0.0     1000     1
+vanilla      noise           -19.7±0.0     1000     1
+vanilla      combined        -11.9±0.0     1000     1
+rarl         nominal         -18.9±0.0     1000     1
+rarl         force           -17.1±0.0     1000     1
+rarl         params          -15.3±0.0     1000     1
+rarl         noise           -17.7±0.0     1000     1
+rarl         combined        -15.9±0.0     1000     1
+sa_mdp       nominal         -18.6±0.0     1000     1
+sa_mdp       force           -14.5±0.0     1000     1
+sa_mdp       params          -19.7±0.0     1000     1
+sa_mdp       noise           -16.9±0.0     1000     1
+sa_mdp       combined        -20.7±0.0     1000     1
+dr           nominal         -17.3±0.0     1000     1
+dr           force           -15.8±0.0     1000     1
+dr           params          -17.5±0.0     1000     1
+dr           noise           -18.7±0.0     1000     1
+dr           combined        -12.2±0.0     1000     1
+rzsm         nominal         -18.5±0.0     1000     1
+rzsm         force           -15.4±0.0     1000     1
+rzsm         params          -16.7±0.0     1000     1
+rzsm         noise           -19.2±0.0     1000     1
+rzsm         combined        -15.8±0.0     1000     1
+
+  Robustness Ratios (J_rob / J_nom):
+Method       Scenario        Ratio
+------------------------------------
+vanilla      force           0.875
+vanilla      params          1.024
+vanilla      noise           1.064
+vanilla      combined        0.642
+rarl         force           0.905
+rarl         params          0.812
+rarl         noise           0.936
+rarl         combined        0.842
+sa_mdp       force           0.778
+sa_mdp       params          1.061
+sa_mdp       noise           0.909
+sa_mdp       combined        1.115
+dr           force           0.915
+dr           params          1.011
+dr           noise           1.080
+dr           combined        0.708
+rzsm         force           0.830
+rzsm         params          0.902
+rzsm         noise           1.034
+rzsm         combined        0.853
+
+Done.
+
+>>> Phase 7: Generating plots...
+Loading results for Swimmer-v5...
+  25 rows: 5 methods x 5 scenarios (1 seed)
+
+Saved: results/Swimmer_v5/figures/fig1_performance_comparison.pdf
+Saved: results/Swimmer_v5/figures/fig2_robustness_heatmap.pdf
+Saved: results/Swimmer_v5/figures/fig3_survival.pdf
+Saved: results/Swimmer_v5/figures/fig4_training_curves.pdf
+Saved: results/Swimmer_v5/figures/fig5_performance_drop.pdf
+
+======================================================================
+  TABLE 1: Performance Comparison (paste into paper.tex)
+======================================================================
+\begin{table}[!t]
+\caption{Mean episode return ($\pm$ std) across disturbance scenarios on Swimmer-v5.}
+\label{tab:results}
+\centering
+\footnotesize
+\begin{tabular}{lccccc}
+\toprule
+Method & Nominal & Ext. Force & Param. Perturb. & Obs. Noise & Combined \\
+\midrule
+Vanilla DDPG & $-19 \pm 0$ & $-16 \pm 0$ & $-19 \pm 0$ & $-20 \pm 0$ & $-12 \pm 0$ \\
+RARL & $-19 \pm 0$ & $-17 \pm 0$ & $-15 \pm 0$ & $-18 \pm 0$ & $-16 \pm 0$ \\
+SA-MDP & $-19 \pm 0$ & $-14 \pm 0$ & $-20 \pm 0$ & $-17 \pm 0$ & $-21 \pm 0$ \\
+Domain Rand. & $-17 \pm 0$ & $-16 \pm 0$ & $-17 \pm 0$ & $-19 \pm 0$ & $-12 \pm 0$ \\
+\midrule
+RZSM (Ours) & $-19 \pm 0$ & $-15 \pm 0$ & $-17 \pm 0$ & $-19 \pm 0$ & $-16 \pm 0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+======================================================================
+  TABLE 2: Robustness Ratios (paste into paper.tex)
+======================================================================
+\begin{table}[!t]
+\caption{Robustness ratio $J_{\text{rob}} / J_{\text{nom}}$ (closer to 1.0 is better).}
+\label{tab:robustness}
+\centering
+\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+Method & Ext. Force & Param. Perturb. & Obs. Noise & Combined \\
+\midrule
+Vanilla DDPG & 0.88 & 1.02 & 1.06 & 0.64 \\
+RARL & 0.90 & 0.81 & 0.94 & 0.84 \\
+SA-MDP & 0.78 & 1.06 & 0.91 & 1.12 \\
+Domain Rand. & 0.91 & 1.01 & 1.08 & 0.71 \\
+\midrule
+RZSM (Ours) & 0.83 & 0.90 & 1.03 & 0.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All figures saved to: results/Swimmer_v5/figures/
+  fig1_performance_comparison.pdf
+  fig1_performance_comparison.png
+  fig2_robustness_heatmap.pdf
+  fig2_robustness_heatmap.png
+  fig3_survival.pdf
+  fig3_survival.png
+  fig4_training_curves.pdf
+  fig4_training_curves.png
+  fig5_performance_drop.pdf
+  fig5_performance_drop.png
+
+>>> Phase 8: Pushing results to git...
+[main 14d16a1] Training results: Swimmer-v5 1 seeds 1 epochs [2026-02-12_21:55]
+ 13 files changed, 64 insertions(+)
+ create mode 100644 results/Swimmer_v5/comparison_table.csv
+ create mode 100644 results/Swimmer_v5/detection_metrics.json
+ create mode 100644 results/Swimmer_v5/figures/fig1_performance_comparison.pdf
+ create mode 100644 results/Swimmer_v5/figures/fig1_performance_comparison.png
+ create mode 100644 results/Swimmer_v5/figures/fig2_robustness_heatmap.pdf
+ create mode 100644 results/Swimmer_v5/figures/fig2_robustness_heatmap.png
+ create mode 100644 results/Swimmer_v5/figures/fig3_survival.pdf
+ create mode 100644 results/Swimmer_v5/figures/fig3_survival.png
+ create mode 100644 results/Swimmer_v5/figures/fig4_training_curves.pdf
+ create mode 100644 results/Swimmer_v5/figures/fig4_training_curves.png
+ create mode 100644 results/Swimmer_v5/figures/fig5_performance_drop.pdf
+ create mode 100644 results/Swimmer_v5/figures/fig5_performance_drop.png
+ create mode 100644 results/Swimmer_v5/per_seed_results.csv
+To github.com:alibaniasad1999/robust-zero-sum-marl.git
+   bde1db8..14d16a1  main -> main
+
+==========================================
+  All done! Results committed & pushed.
+==========================================

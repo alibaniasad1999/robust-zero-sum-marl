@@ -1,0 +1,403 @@
+==========================================
+  Multi-seed training
+  Seeds: 1 | Epochs: 1
+  Env: Reacher-v5 | Parallel envs: 1
+  Log base: logs/Reacher_v5
+==========================================
+
+>>> Phase 1: Training vanilla (nominal) policies...
+  [vanilla] seed=0
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=69122  q_params=69377
+
+[DDPGAgent] Epoch 1/1  elapsed=0s  buf=4000
+  return      -43.0  (episodes=78  mean_len=51)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.4s  steps/s=10925  updates/s=0
+         env_step=0.21s (0.05ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=1MB  reserved=2MB
+  [saved] logs/Reacher_v5/vanilla/seed_0/checkpoints
+Done.
+
+>>> Phase 2: Training RARL policies...
+  [rarl] seed=0
+[AdversarialDDPG] Loaded pi_opt from logs/Reacher_v5/vanilla/seed_0/checkpoints
+[AdversarialDDPG] device=cuda  num_envs=1  pi_rob=69122  pi_adv=69122  q=69889
+
+[AdversarialDDPG] Epoch 1/1  elapsed=1s  buf=4000
+  return      -43.2  (episodes=78  dist=38  mean_len=51)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.5s  steps/s=7861  updates/s=0
+         env_step=0.25s (0.06ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=2MB  reserved=4MB
+  [saved] logs/Reacher_v5/rarl/seed_0/checkpoints
+Done.
+
+>>> Phase 3: Training SA-MDP policies...
+  [sa_mdp] seed=0
+<frozen runpy>:128: RuntimeWarning: 'src.baselines.sa_mdp' found in sys.modules after import of package 'src.baselines', but prior to execution of 'src.baselines.sa_mdp'; this may result in unpredictable behaviour
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=69122  q_params=69377
+[SA-MDP] eps=0.05
+  step=49  ret=-42.0  len=50
+  step=100  ret=-46.6  len=51
+  step=151  ret=-39.8  len=51
+  step=202  ret=-48.3  len=51
+  step=253  ret=-39.1  len=51
+  step=304  ret=-46.7  len=51
+  step=355  ret=-45.2  len=51
+  step=406  ret=-38.8  len=51
+  step=457  ret=-51.6  len=51
+  step=508  ret=-41.2  len=51
+  step=559  ret=-43.1  len=51
+  step=610  ret=-44.3  len=51
+  step=661  ret=-38.1  len=51
+  step=712  ret=-43.8  len=51
+  step=763  ret=-37.3  len=51
+  step=814  ret=-41.4  len=51
+  step=865  ret=-44.2  len=51
+  step=916  ret=-44.8  len=51
+  step=967  ret=-37.5  len=51
+  step=1018  ret=-40.2  len=51
+  step=1069  ret=-42.8  len=51
+  step=1120  ret=-39.9  len=51
+  step=1171  ret=-43.0  len=51
+  step=1222  ret=-39.0  len=51
+  step=1273  ret=-40.6  len=51
+  step=1324  ret=-41.6  len=51
+  step=1375  ret=-41.7  len=51
+  step=1426  ret=-46.9  len=51
+  step=1477  ret=-48.9  len=51
+  step=1528  ret=-39.3  len=51
+  step=1579  ret=-44.8  len=51
+  step=1630  ret=-46.8  len=51
+  step=1681  ret=-40.6  len=51
+  step=1732  ret=-41.8  len=51
+  step=1783  ret=-43.7  len=51
+  step=1834  ret=-35.7  len=51
+  step=1885  ret=-41.5  len=51
+  step=1936  ret=-38.5  len=51
+  step=1987  ret=-42.7  len=51
+  step=2038  ret=-43.3  len=51
+  step=2089  ret=-47.8  len=51
+  step=2140  ret=-40.2  len=51
+  step=2191  ret=-37.9  len=51
+  step=2242  ret=-42.9  len=51
+  step=2293  ret=-39.5  len=51
+  step=2344  ret=-40.7  len=51
+  step=2395  ret=-41.0  len=51
+  step=2446  ret=-42.7  len=51
+  step=2497  ret=-41.6  len=51
+  step=2548  ret=-45.3  len=51
+  step=2599  ret=-48.5  len=51
+  step=2650  ret=-39.7  len=51
+  step=2701  ret=-50.3  len=51
+  step=2752  ret=-42.4  len=51
+  step=2803  ret=-47.5  len=51
+  step=2854  ret=-39.1  len=51
+  step=2905  ret=-42.5  len=51
+  step=2956  ret=-46.1  len=51
+  step=3007  ret=-44.4  len=51
+  step=3058  ret=-40.0  len=51
+  step=3109  ret=-43.3  len=51
+  step=3160  ret=-39.0  len=51
+  step=3211  ret=-46.3  len=51
+  step=3262  ret=-35.3  len=51
+  step=3313  ret=-41.2  len=51
+  step=3364  ret=-43.9  len=51
+  step=3415  ret=-41.4  len=51
+  step=3466  ret=-43.1  len=51
+  step=3517  ret=-45.5  len=51
+  step=3568  ret=-48.8  len=51
+  step=3619  ret=-38.3  len=51
+  step=3670  ret=-38.1  len=51
+  step=3721  ret=-47.2  len=51
+  step=3772  ret=-44.3  len=51
+  step=3823  ret=-41.9  len=51
+  step=3874  ret=-49.1  len=51
+  step=3925  ret=-47.7  len=51
+  step=3976  ret=-40.0  len=51
+[SA-MDP] Epoch 1/1  elapsed=1s
+  [saved] logs/Reacher_v5/sa_mdp/seed_0/checkpoints
+Done.
+
+>>> Phase 4: Training Domain Randomization policies...
+  [dr] seed=0
+<frozen runpy>:128: RuntimeWarning: 'src.baselines.domain_randomization' found in sys.modules after import of package 'src.baselines', but prior to execution of 'src.baselines.domain_randomization'; this may result in unpredictable behaviour
+Device is: cuda
+[DDPGAgent] device=cuda  num_envs=1  pi_params=69122  q_params=69377
+
+[DDPGAgent] Epoch 1/1  elapsed=0s  buf=4000
+  return      -43.3  (episodes=78  mean_len=51)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.4s  steps/s=10427  updates/s=0
+         env_step=0.22s (0.05ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=1MB  reserved=2MB
+  [saved] logs/Reacher_v5/dr/seed_0/checkpoints
+Done.
+
+>>> Phase 5: Training RZSM policies...
+  [rzsm] seed=0
+[AdversarialDDPG] Loaded pi_opt from logs/Reacher_v5/vanilla/seed_0/checkpoints
+[AdversarialDDPG] device=cuda  num_envs=1  pi_rob=69122  pi_adv=69122  q=69889
+
+[AdversarialDDPG] Epoch 1/1  elapsed=1s  buf=4000
+  return      -42.8  (episodes=78  dist=38  mean_len=51)
+  [perf] device=GPU (NVIDIA GeForce RTX 3080)  epoch_time=0.5s  steps/s=7450  updates/s=0
+         env_step=0.26s (0.07ms/call x4000)  buf_sample=0.00s (0.00ms/call x0)  update=0.00s (0.00ms/call x0)
+         GPU mem: alloc=3MB  reserved=4MB
+  [saved] logs/Reacher_v5/rzsm/seed_0/checkpoints
+Done.
+
+==========================================
+  Training complete!
+  Checkpoints: logs/Reacher_v5/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/
+==========================================
+
+>>> Phase 6: Running evaluation...
+
+============================================================
+  Method: vanilla
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -11.4 +/- 2.6  len = 50  (1.0s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -10.5 +/- 2.4  len = 50  (1.6s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -11.1 +/- 2.6  len = 50  (2.5s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -10.3 +/- 2.4  len = 50  (3.8s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -10.8 +/- 2.6  len = 50  (4.6s)
+
+============================================================
+  Method: rarl
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -11.1 +/- 3.1  len = 50  (4.6s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -10.4 +/- 2.1  len = 50  (3.7s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -11.0 +/- 2.9  len = 50  (3.7s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -11.0 +/- 2.7  len = 50  (3.7s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -10.6 +/- 2.6  len = 50  (3.7s)
+
+============================================================
+  Method: sa_mdp
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -11.5 +/- 2.9  len = 50  (3.7s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -10.9 +/- 2.8  len = 50  (3.9s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -11.2 +/- 2.7  len = 50  (3.8s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -11.1 +/- 2.6  len = 50  (3.7s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -11.6 +/- 2.6  len = 50  (3.7s)
+
+============================================================
+  Method: dr
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -10.8 +/- 2.4  len = 50  (3.7s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -10.9 +/- 2.9  len = 50  (3.8s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -11.0 +/- 3.2  len = 50  (3.8s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -10.7 +/- 2.5  len = 50  (3.8s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -11.5 +/- 3.1  len = 50  (3.8s)
+
+============================================================
+  Method: rzsm
+============================================================
+  Found 1 seed(s): ['seed_0']
+
+  Scenario: nominal  (50 episodes/seed)
+    seed_0: J = -11.9 +/- 2.3  len = 50  (9.9s)
+
+  Scenario: force  (50 episodes/seed)
+    seed_0: J = -10.7 +/- 2.5  len = 50  (10.6s)
+
+  Scenario: params  (50 episodes/seed)
+    seed_0: J = -11.4 +/- 2.7  len = 50  (10.4s)
+
+  Scenario: noise  (50 episodes/seed)
+    seed_0: J = -10.9 +/- 2.7  len = 50  (10.4s)
+
+  Scenario: combined  (50 episodes/seed)
+    seed_0: J = -11.3 +/- 3.0  len = 50  (10.7s)
+Saved: results/Reacher_v5/comparison_table.csv
+Saved: results/Reacher_v5/per_seed_results.csv
+Saved: results/Reacher_v5/detection_metrics.json
+
+======================================================================
+  RESULTS: Reacher-v5  (aggregated across seeds)
+======================================================================
+Method       Scenario           Return   Length  Seeds
+--------------------------------------------------------
+vanilla      nominal         -11.4±0.0       50     1
+vanilla      force           -10.5±0.0       50     1
+vanilla      params          -11.1±0.0       50     1
+vanilla      noise           -10.3±0.0       50     1
+vanilla      combined        -10.8±0.0       50     1
+rarl         nominal         -11.1±0.0       50     1
+rarl         force           -10.4±0.0       50     1
+rarl         params          -11.0±0.0       50     1
+rarl         noise           -11.0±0.0       50     1
+rarl         combined        -10.6±0.0       50     1
+sa_mdp       nominal         -11.5±0.0       50     1
+sa_mdp       force           -10.9±0.0       50     1
+sa_mdp       params          -11.2±0.0       50     1
+sa_mdp       noise           -11.1±0.0       50     1
+sa_mdp       combined        -11.6±0.0       50     1
+dr           nominal         -10.8±0.0       50     1
+dr           force           -10.9±0.0       50     1
+dr           params          -11.0±0.0       50     1
+dr           noise           -10.7±0.0       50     1
+dr           combined        -11.5±0.0       50     1
+rzsm         nominal         -11.9±0.0       50     1
+rzsm         force           -10.7±0.0       50     1
+rzsm         params          -11.4±0.0       50     1
+rzsm         noise           -10.9±0.0       50     1
+rzsm         combined        -11.3±0.0       50     1
+
+  Robustness Ratios (J_rob / J_nom):
+Method       Scenario        Ratio
+------------------------------------
+vanilla      force           0.926
+vanilla      params          0.973
+vanilla      noise           0.909
+vanilla      combined        0.948
+rarl         force           0.935
+rarl         params          0.988
+rarl         noise           0.988
+rarl         combined        0.952
+sa_mdp       force           0.944
+sa_mdp       params          0.974
+sa_mdp       noise           0.968
+sa_mdp       combined        1.004
+dr           force           1.007
+dr           params          1.021
+dr           noise           0.988
+dr           combined        1.068
+rzsm         force           0.902
+rzsm         params          0.954
+rzsm         noise           0.914
+rzsm         combined        0.949
+
+Done.
+
+>>> Phase 7: Generating plots...
+Loading results for Reacher-v5...
+  25 rows: 5 methods x 5 scenarios (1 seed)
+
+Saved: results/Reacher_v5/figures/fig1_performance_comparison.pdf
+Saved: results/Reacher_v5/figures/fig2_robustness_heatmap.pdf
+Saved: results/Reacher_v5/figures/fig3_survival.pdf
+Saved: results/Reacher_v5/figures/fig4_training_curves.pdf
+Saved: results/Reacher_v5/figures/fig5_performance_drop.pdf
+
+======================================================================
+  TABLE 1: Performance Comparison (paste into paper.tex)
+======================================================================
+\begin{table}[!t]
+\caption{Mean episode return ($\pm$ std) across disturbance scenarios on Reacher-v5.}
+\label{tab:results}
+\centering
+\footnotesize
+\begin{tabular}{lccccc}
+\toprule
+Method & Nominal & Ext. Force & Param. Perturb. & Obs. Noise & Combined \\
+\midrule
+Vanilla DDPG & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-10 \pm 0$ & $-11 \pm 0$ \\
+RARL & $-11 \pm 0$ & $-10 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ \\
+SA-MDP & $-12 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-12 \pm 0$ \\
+Domain Rand. & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-12 \pm 0$ \\
+\midrule
+RZSM (Ours) & $-12 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ & $-11 \pm 0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+======================================================================
+  TABLE 2: Robustness Ratios (paste into paper.tex)
+======================================================================
+\begin{table}[!t]
+\caption{Robustness ratio $J_{\text{rob}} / J_{\text{nom}}$ (closer to 1.0 is better).}
+\label{tab:robustness}
+\centering
+\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+Method & Ext. Force & Param. Perturb. & Obs. Noise & Combined \\
+\midrule
+Vanilla DDPG & 0.93 & 0.97 & 0.91 & 0.95 \\
+RARL & 0.94 & 0.99 & 0.99 & 0.95 \\
+SA-MDP & 0.94 & 0.97 & 0.97 & 1.00 \\
+Domain Rand. & 1.01 & 1.02 & 0.99 & 1.07 \\
+\midrule
+RZSM (Ours) & 0.90 & 0.95 & 0.91 & 0.95 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All figures saved to: results/Reacher_v5/figures/
+  fig1_performance_comparison.pdf
+  fig1_performance_comparison.png
+  fig2_robustness_heatmap.pdf
+  fig2_robustness_heatmap.png
+  fig3_survival.pdf
+  fig3_survival.png
+  fig4_training_curves.pdf
+  fig4_training_curves.png
+  fig5_performance_drop.pdf
+  fig5_performance_drop.png
+
+>>> Phase 8: Pushing results to git...
+[main 09a1c2e] Training results: Reacher-v5 1 seeds 1 epochs [2026-02-12_21:34]
+ 13 files changed, 64 insertions(+)
+ create mode 100644 results/Reacher_v5/comparison_table.csv
+ create mode 100644 results/Reacher_v5/detection_metrics.json
+ create mode 100644 results/Reacher_v5/figures/fig1_performance_comparison.pdf
+ create mode 100644 results/Reacher_v5/figures/fig1_performance_comparison.png
+ create mode 100644 results/Reacher_v5/figures/fig2_robustness_heatmap.pdf
+ create mode 100644 results/Reacher_v5/figures/fig2_robustness_heatmap.png
+ create mode 100644 results/Reacher_v5/figures/fig3_survival.pdf
+ create mode 100644 results/Reacher_v5/figures/fig3_survival.png
+ create mode 100644 results/Reacher_v5/figures/fig4_training_curves.pdf
+ create mode 100644 results/Reacher_v5/figures/fig4_training_curves.png
+ create mode 100644 results/Reacher_v5/figures/fig5_performance_drop.pdf
+ create mode 100644 results/Reacher_v5/figures/fig5_performance_drop.png
+ create mode 100644 results/Reacher_v5/per_seed_results.csv
+To github.com:alibaniasad1999/robust-zero-sum-marl.git
+   a3cc5a3..09a1c2e  main -> main
+
+==========================================
+  All done! Results committed & pushed.
+==========================================
