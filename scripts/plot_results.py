@@ -63,7 +63,7 @@ METHODS = ["vanilla", "rarl", "sa_mdp", "dr", "rzsm"]
 SCENARIOS = ["nominal", "force", "params", "noise", "combined"]
 
 METHOD_LABELS = {
-    "vanilla": "Vanilla DDPG",
+    "vanilla": "Vanilla TD3",
     "rarl": "RARL",
     "sa_mdp": "SA-MDP",
     "dr": "Domain Rand.",
