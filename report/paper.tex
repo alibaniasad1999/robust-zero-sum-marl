@@ -1794,22 +1794,22 @@ Exploration noise & $\sigma$ & 0.1 \\
 Random exploration steps & -- & 25{,}000 \\
 Updates start after & -- & 25{,}000 steps \\
 Update interval & -- & every 50 env steps \\
-Gradient steps per update & -- & 50 \\
+Gradient steps per update & -- & 500 \\
 Steps per epoch & -- & 4{,}000 \\
 Total epochs & -- & 250 \\
 Parallel environments & -- & 10 \\
 Seeds per method & -- & 5 \\
 \hline
 \multicolumn{3}{l}{\textit{Adversarial (RARL / RZSM)}} \\
-Disturbance ratio & $\delta_{\max}$ & 0.1 \\
+Disturbance ratio & $\delta_{\max}$ & 0.15 \\
 Disturbance probability & $p_{\mathrm{dist}}$ & 0.5 \\
 \hline
 \multicolumn{3}{l}{\textit{Transformer Detector (RZSM only)}} \\
-Sequence length & $L$ & 20 \\
-Model dimension & $d_{\mathrm{model}}$ & 128 \\
+Sequence length & $L$ & 10 \\
+Model dimension & $d_{\mathrm{model}}$ & 64 \\
 Attention heads & $H$ & 4 \\
-Encoder layers & $N_L$ & 3 \\
-Detector learning rate & $\eta_{\mathrm{det}}$ & $1 \times 10^{-4}$ \\
+Encoder layers & $N_L$ & 2 \\
+Detector learning rate & $\eta_{\mathrm{det}}$ & $3 \times 10^{-4}$ \\
 Detector train interval & -- & every 500 steps \\
 \hline
 \end{tabular}
