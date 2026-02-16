@@ -151,7 +151,7 @@ class DisturbanceDetectorTrainer:
         pred_dist, pred_alpha = self.model(obs_seq)
         loss_dist = self.bce(pred_dist, true_dist)
         loss_alpha = self.mse(pred_alpha, true_alpha)
-        loss = loss_dist + 2.0 * loss_alpha
+        loss = loss_dist + loss_alpha
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
@@ -172,7 +172,7 @@ class DisturbanceDetectorTrainer:
         pred_dist, pred_alpha = self.model(obs_seq)
         loss_dist = self.bce(pred_dist, true_dist)
         loss_alpha = self.mse(pred_alpha, true_alpha)
-        loss = loss_dist + 2.0 * loss_alpha
+        loss = loss_dist + loss_alpha
         return {
             "loss_disturbance": loss_dist.item(),
             "loss_blending": loss_alpha.item(),

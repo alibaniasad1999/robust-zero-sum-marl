@@ -76,6 +76,19 @@ _DISTURBANCE_PROFILES: Dict[str, Dict[str, Any]] = {
                                   "force_duration": 8,
                                   "mass_range": 0.5, "friction_range": 0.5,
                                   "damping_range": 0.5, "noise_std": 0.05},
+    # --- Medium locomotion (HalfCheetah, Walker, Hopper) ---
+    "HalfCheetah-v5":            {"force_mag": 150.0, "interval": (30, 100),
+                                  "force_duration": 10,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.15},
+    "Walker2d-v5":               {"force_mag": 120.0, "interval": (30, 100),
+                                  "force_duration": 8,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.10},
+    "Hopper-v5":                 {"force_mag": 100.0, "interval": (30, 100),
+                                  "force_duration": 8,
+                                  "mass_range": 0.5, "friction_range": 0.5,
+                                  "damping_range": 0.5, "noise_std": 0.10},
 }
 
 # Default profile for complex locomotion envs (Ant, Humanoid, etc.)
@@ -209,10 +222,10 @@ def load_rzsm_policy(
     env_id: str,
     device: torch.device,
     hidden_sizes: Tuple[int, ...] = (256, 256),
-    seq_len: int = 10,
-    d_model: int = 64,
+    seq_len: int = 20,
+    d_model: int = 128,
     nhead: int = 4,
-    num_layers: int = 2,
+    num_layers: int = 3,
 ) -> Tuple[Callable[[np.ndarray], np.ndarray], "RZSMPolicyState"]:
     """Load full RZSM: pi_opt + pi_rob + transformer detector with blending."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
@@ -663,8 +676,9 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=str, default=None,
                     help="Root dir containing method subdirectories "
                          "(default: logs/<env_safe>/)")
-    p.add_argument("--episodes", type=int, default=50,
-                    help="Evaluation episodes per (method, scenario, seed)")
+    p.add_argument("--episodes", type=int, default=10,
+                    help="Evaluation episodes per (method, scenario, seed). "
+                         "Use at least 10 for reliable results.")
     p.add_argument("--output", type=str, default="results/",
                     help="Output directory for results")
     p.add_argument("--device", type=str, default="auto")

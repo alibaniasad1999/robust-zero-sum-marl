@@ -39,18 +39,18 @@ def main() -> None:
     p.add_argument("--env", type=str, default="Ant-v5", help="Gymnasium env id")
     p.add_argument("--mode", choices=["nominal", "adversarial"], default="nominal")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--steps-per-epoch", type=int, default=4000)
-    p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--start-steps", type=int, default=5000)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--start-steps", type=int, default=10000)
     p.add_argument("--update-after", type=int, default=10000)
     p.add_argument("--num-envs", type=int, default=1,
                     help="Number of parallel environments (vectorized)")
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--log-dir", type=str, default=None)
     # adversarial-specific
-    p.add_argument("--disturbance-ratio", type=float, default=0.1)
-    p.add_argument("--disturbance-prob", type=float, default=0.5)
+    p.add_argument("--disturbance-ratio", type=float, default=0.05)
+    p.add_argument("--disturbance-prob", type=float, default=0.3)
     p.add_argument("--pi-opt-path", type=str, default=None,
                     help="Path to pre-trained optimal policy checkpoints (for blending)")
     p.add_argument("--no-transformer", action="store_true",
