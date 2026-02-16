@@ -74,11 +74,23 @@ if [[ -z "$ENV" ]]; then
 fi
 
 # ── Compute epochs from total steps ──────────────────────────────────
-STEPS_PER_EPOCH=4000
+# steps_per_epoch must be large enough for episodes to complete within
+# one epoch.  MuJoCo locomotion episodes are 1000 steps, so we need
+# steps_per_epoch >= num_envs * 1000 (at minimum).  We use 2x that to
+# guarantee several episodes finish per epoch for stable logging.
+MIN_SPE=$(( NUM_ENVS * 2000 ))
+if (( MIN_SPE < 4000 )); then
+  MIN_SPE=4000
+fi
+STEPS_PER_EPOCH=$MIN_SPE
 EPOCHS=$(( STEPS / STEPS_PER_EPOCH ))
 if (( EPOCHS < 1 )); then
   EPOCHS=1
 fi
+
+# Scale exploration / warmup to num_envs (buffer fills N times faster)
+START_STEPS=$(( NUM_ENVS * 1000 ))      # ~1 episode of random per env
+UPDATE_AFTER=$(( NUM_ENVS * 1000 ))     # start learning after ~1 ep/env
 
 ENV_SAFE="${ENV//-/_}"
 ENV_DIR="logs/${ENV_SAFE}"
@@ -123,7 +135,9 @@ echo ">>> [1/5] Training vanilla (nominal) policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [vanilla] seed=$seed"
   python -m src.train --env "$ENV" --mode nominal --seed "$seed" \
-    --epochs "$EPOCHS" --num-envs "$NUM_ENVS" --device "$DEVICE" \
+    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
+    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+    --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/vanilla"
 done
 
@@ -133,7 +147,9 @@ echo ">>> [2/5] Training RARL policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [rarl] seed=$seed"
   python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
-    --epochs "$EPOCHS" --num-envs "$NUM_ENVS" --device "$DEVICE" \
+    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
+    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+    --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/rarl" --no-transformer \
     --disturbance-ratio 0.05 --disturbance-prob 0.3 \
     --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
@@ -145,7 +161,9 @@ echo ">>> [3/5] Training SA-MDP policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [sa_mdp] seed=$seed"
   python -m src.baselines.sa_mdp --env "$ENV" --seed "$seed" \
-    --epochs "$EPOCHS" --num-envs "$NUM_ENVS" --device "$DEVICE" \
+    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
+    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+    --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/sa_mdp/seed_${seed}"
 done
 
@@ -155,7 +173,9 @@ echo ">>> [4/5] Training Domain Randomization policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [dr] seed=$seed"
   python -m src.baselines.domain_randomization --env "$ENV" --seed "$seed" \
-    --epochs "$EPOCHS" --num-envs "$NUM_ENVS" --device "$DEVICE" \
+    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
+    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+    --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/dr/seed_${seed}"
 done
 
@@ -165,7 +185,9 @@ echo ">>> [5/5] Training RZSM policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [rzsm] seed=$seed"
   python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
-    --epochs "$EPOCHS" --num-envs "$NUM_ENVS" --device "$DEVICE" \
+    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
+    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+    --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/rzsm" \
     --disturbance-ratio 0.05 --disturbance-prob 0.3 \
     --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
