@@ -1,2 +1,0 @@
-epoch,step,loss_q,loss_pi,q_val,grad_q,grad_pi,mean_return,mean_length,episodes,buffer_size,elapsed_s
-1,3999,,,,,,-150.04,101.0,39,4000,0.6

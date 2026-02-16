@@ -1,6 +1,0 @@
-epoch,global_step,device,epoch_wall_s,steps_per_sec,updates_per_sec,env_step_total_s,env_step_mean_ms,buffer_sample_total_s,buffer_sample_mean_ms,update_total_s,update_mean_ms,gpu_mem_allocated_mb,gpu_mem_reserved_mb
-1,3900,CPU,0.27,14698.8,0.0,0.193,4.822,0.000,0.000,0.000,0.000,0.0,0.0
-2,7900,CPU,0.32,12524.8,0.0,0.281,7.031,0.000,0.000,0.000,0.000,0.0,0.0
-3,11900,CPU,8.44,473.8,59.2,0.330,8.253,0.262,0.523,7.827,15.653,0.0,0.0
-4,15900,CPU,8.42,475.2,59.4,0.372,9.305,0.265,0.530,7.756,15.512,0.0,0.0
-5,19900,CPU,0.41,9655.1,0.0,0.390,9.739,0.000,0.000,0.000,0.000,0.0,0.0
