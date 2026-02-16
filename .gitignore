@@ -9,6 +9,7 @@ build/
 # Virtual environments
 .env/
 .venv/
+.claude/
 venv/
 
 # IDE
