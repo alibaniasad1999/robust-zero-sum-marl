@@ -73,24 +73,25 @@ if [[ -z "$ENV" ]]; then
   exit 1
 fi
 
-# ── Compute epochs from total steps ──────────────────────────────────
-# steps_per_epoch must be large enough for episodes to complete within
-# one epoch.  MuJoCo locomotion episodes are 1000 steps, so we need
-# steps_per_epoch >= num_envs * 1000 (at minimum).  We use 2x that to
-# guarantee several episodes finish per epoch for stable logging.
-MIN_SPE=$(( NUM_ENVS * 2000 ))
-if (( MIN_SPE < 4000 )); then
-  MIN_SPE=4000
+# ── Compute steps_per_epoch and epochs ────────────────────────────────
+# steps_per_epoch counts TOTAL transitions (across all envs).
+# Each env takes steps_per_epoch/num_envs steps per epoch.
+# MuJoCo episodes are 1000 steps → need steps_per_epoch >= num_envs*1000
+# so at least 1 episode completes per env per epoch.
+# With many envs (e.g. 100), 1 ep/env/epoch = 100 episodes for logging.
+STEPS_PER_EPOCH=$(( NUM_ENVS * 1000 ))
+if (( STEPS_PER_EPOCH < 4000 )); then
+  STEPS_PER_EPOCH=4000
 fi
-STEPS_PER_EPOCH=$MIN_SPE
 EPOCHS=$(( STEPS / STEPS_PER_EPOCH ))
 if (( EPOCHS < 1 )); then
   EPOCHS=1
 fi
 
-# Scale exploration / warmup to num_envs (buffer fills N times faster)
-START_STEPS=$(( NUM_ENVS * 1000 ))      # ~1 episode of random per env
-UPDATE_AFTER=$(( NUM_ENVS * 1000 ))     # start learning after ~1 ep/env
+# Exploration warmup: fill buffer with ~25K random transitions
+# (enough diversity regardless of num_envs)
+START_STEPS=25000
+UPDATE_AFTER=25000
 
 ENV_SAFE="${ENV//-/_}"
 ENV_DIR="logs/${ENV_SAFE}"
