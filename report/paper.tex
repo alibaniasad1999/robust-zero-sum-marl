@@ -81,8 +81,7 @@ probability and an estimated magnitude.  A learned gating function converts
 this estimate into a continuous mixing coefficient $\alpha_t \in [0,1]$
 that blends the two policies, yielding actions
 $a_t = \alpha_t\,\pirob(s_t) + (1-\alpha_t)\,\piopt(s_t)$.  The training
-pipeline is implemented in PyTorch with Gymnasium and MuJoCo, with a
-planned migration to JAX and MJX for GPU-vectorized environment
+pipeline is implemented in PyTorch with Gymnasium and MuJoCo with a vectorized environment
 parallelism.  For deployment, all neural network components are exported
 through ONNX to TensorRT engines optimized for the NVIDIA Jetson platform,
 and integrated into a ROS~2 control node that achieves sub-two-millisecond
@@ -90,7 +89,8 @@ inference latency at up to 500\,Hz.  We provide a complete data-logging
 specification, three detailed algorithmic procedures covering adversarial
 training, transformer detector training, and real-time inference, and a
 comprehensive evaluation plan with ablation studies and baselines.
-Preliminary experiments on the Ant-v5 benchmark demonstrate that our
+Preliminary experiments on the Ant-v5 % TODO: add more benchmarks
+benchmark demonstrate that our
 method achieves the most consistent robustness ratios across four
 disturbance scenarios compared to Vanilla DDPG, RARL, SA-MDP, and domain
 randomization baselines, while maintaining the longest survival times
@@ -156,9 +156,9 @@ This paper addresses these gaps with the following contributions:
       components to ONNX, optimizes them with TensorRT for the NVIDIA
       Jetson platform, and integrates them into a ROS~2 node meeting
       sub-two-millisecond latency budgets.
-\item A \textbf{comprehensive evaluation plan} including ablation studies,
-      baselines, and safety checks, designed to rigorously validate the
-      approach once empirical experiments are conducted.
+% \item A \textbf{comprehensive evaluation plan} including ablation studies,
+%       baselines, and safety checks, designed to rigorously validate the
+%       approach once empirical experiments are conducted.
 \end{itemize}
 
 The remainder of this paper is organized as follows.
@@ -229,19 +229,18 @@ adversary, yielding a policy with formal worst-case performance
 guarantees.
 
 % ---------------------------------------------------------------------------
-\subsection{Deep Reinforcement Learning Algorithms}\label{sec:bg_drl}
+\subsection{Deep Reinforcement Learning Algorithm}\label{sec:bg_drl}
 % ---------------------------------------------------------------------------
-
-We consider four deep RL algorithms as candidate training methods for
+We consider TD3 as a deep RL algorithm for training
 both the controller and the adversary.
 
-\textbf{DDPG}~\cite{lillicrap2016continuous} is an off-policy actor-critic
-algorithm for continuous action spaces.  It maintains a deterministic
-policy $\mu_\theta(s)$, a critic $Q_\phi(s,a)$, a replay buffer for
-experience storage, and target networks $\mu_{\theta'}$, $Q_{\phi'}$
-updated via Polyak averaging.  The critic is trained by minimizing the
-temporal-difference (TD) error, and the actor is updated by applying the
-deterministic policy gradient~\cite{silver2014deterministic}.
+% \textbf{DDPG}~\cite{lillicrap2016continuous} is an off-policy actor-critic
+% algorithm for continuous action spaces.  It maintains a deterministic
+% policy $\mu_\theta(s)$, a critic $Q_\phi(s,a)$, a replay buffer for
+% experience storage, and target networks $\mu_{\theta'}$, $Q_{\phi'}$
+% updated via Polyak averaging.  The critic is trained by minimizing the
+% temporal-difference (TD) error, and the actor is updated by applying the
+% deterministic policy gradient~\cite{silver2014deterministic}.
 
 \textbf{TD3}~\cite{fujimoto2018addressing} improves upon DDPG with three
 modifications: (i)~twin critics $Q_{\phi_1}$, $Q_{\phi_2}$ with the
@@ -250,30 +249,30 @@ policy updates (the actor is updated less frequently than the critic), and
 (iii)~target policy smoothing (noise is added to the target action to
 regularize the critic).
 
-\textbf{SAC}~\cite{haarnoja2018soft} is an off-policy algorithm based on
-the maximum-entropy RL framework.  The objective augments the expected
-return with an entropy term:
-\begin{equation}\label{eq:sac_obj}
-J_{\text{SAC}}(\pi) = \E_\pi\!\left[\sum_{t=0}^{\infty}\gamma^t
-  \Big(R(s_t,a_t) + \beta\,\mathcal{H}\!\big(\pi(\cdot|s_t)\big)\Big)
-  \right],
-\end{equation}
-where $\beta > 0$ is the temperature parameter (often automatically
-tuned) and $\mathcal{H}$ denotes the Shannon entropy.  SAC learns a
-stochastic policy parameterized via the reparameterization trick, combined
-with twin critics as in TD3.
+% \textbf{SAC}~\cite{haarnoja2018soft} is an off-policy algorithm based on
+% the maximum-entropy RL framework.  The objective augments the expected
+% return with an entropy term:
+% \begin{equation}\label{eq:sac_obj}
+% J_{\text{SAC}}(\pi) = \E_\pi\!\left[\sum_{t=0}^{\infty}\gamma^t
+%   \Big(R(s_t,a_t) + \beta\,\mathcal{H}\!\big(\pi(\cdot|s_t)\big)\Big)
+%   \right],
+% \end{equation}
+% where $\beta > 0$ is the temperature parameter (often automatically
+% tuned) and $\mathcal{H}$ denotes the Shannon entropy.  SAC learns a
+% stochastic policy parameterized via the reparameterization trick, combined
+% with twin critics as in TD3.
 
-\textbf{PPO}~\cite{schulman2017proximal} is an on-policy algorithm that
-optimizes a clipped surrogate objective:
-\begin{equation}\label{eq:ppo_obj}
-J_{\text{PPO}}(\theta) = \E_t\!\left[\min\!\big(r_t(\theta)\hat{A}_t,\;
-  \text{clip}(r_t(\theta), 1{-}\epsilon, 1{+}\epsilon)\hat{A}_t\big)
-  \right],
-\end{equation}
-where $r_t(\theta) = \pi_\theta(a_t|s_t)/\pi_{\theta_\text{old}}(a_t|s_t)$
-is the probability ratio and $\hat{A}_t$ is the generalized advantage
-estimate (GAE).  PPO collects rollouts in batches and performs multiple
-epochs of mini-batch optimization before discarding the data.
+% \textbf{PPO}~\cite{schulman2017proximal} is an on-policy algorithm that
+% optimizes a clipped surrogate objective:
+% \begin{equation}\label{eq:ppo_obj}
+% J_{\text{PPO}}(\theta) = \E_t\!\left[\min\!\big(r_t(\theta)\hat{A}_t,\;
+%   \text{clip}(r_t(\theta), 1{-}\epsilon, 1{+}\epsilon)\hat{A}_t\big)
+%   \right],
+% \end{equation}
+% where $r_t(\theta) = \pi_\theta(a_t|s_t)/\pi_{\theta_\text{old}}(a_t|s_t)$
+% is the probability ratio and $\hat{A}_t$ is the generalized advantage
+% estimate (GAE).  PPO collects rollouts in batches and performs multiple
+% epochs of mini-batch optimization before discarding the data.
 
 % ---------------------------------------------------------------------------
 \subsection{Robust Reinforcement Learning Formulations}\label{sec:bg_robust}
@@ -319,6 +318,12 @@ further reduce tail risk.  Vinitsky~et~al.~\cite{vinitsky2020robust}
 showed that training against an \emph{ensemble} of adversarial policies,
 rather than a single adversary, prevents the controller from overfitting
 to one attack strategy and improves generalization.
+% Value at Risk (VaR) is a statistical technique used to quantify the 
+% maximum potential loss of an investment portfolio over a specific timeframe
+%  (e.g., daily or 10-day) with a given confidence level
+%  (typically 95% or 99%) under normal market conditions. It provides a
+%   single, easy-to-understand metric for financial risk management, 
+%   measuring potential downside risk rather than average performance. 
 
 Zhang~et~al.~\cite{zhang2020robust} formulated the state-adversarial MDP
 (SA-MDP), in which the adversary perturbs the agent's observations
@@ -597,7 +602,7 @@ independently.  Both are parameterized as feedforward neural networks
 map observations $o \in \R^d$ to actions $a \in \R^{m_c}$.
 
 \textbf{Optimal policy training.}  The policy $\piopt$ is trained using a
-standard deep RL algorithm (SAC, TD3, or PPO) on the nominal environment,
+standard deep RL algorithm on the nominal environment,
 i.e., with the adversary disabled ($a^d = \boldsymbol{0}$).  This policy
 maximizes the expected return under nominal dynamics and represents the
 best achievable performance when no disturbance is present.
