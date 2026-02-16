@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash scripts/run.sh Ant-v5 250 5 10        # auto-increments run number
-#   bash scripts/run.sh HalfCheetah-v5 100 3 20 2  # forces run_2
+#   bash scripts/run.sh HalfCheetah-v5 200 3 10 2  # forces run_2
 #
 # Arguments:
 #   $1  ENV       Gymnasium environment ID  (default: Ant-v5)
@@ -85,6 +85,7 @@ for seed in $(seq 0 $((SEEDS - 1))); do
   python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
     --epochs "$EPOCHS" --num-envs "$NUM_ENVS" \
     --log-dir "${LOG_BASE}/rarl" --no-transformer \
+    --disturbance-ratio 0.05 --disturbance-prob 0.3 \
     --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
 done
 
@@ -116,6 +117,7 @@ for seed in $(seq 0 $((SEEDS - 1))); do
   python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
     --epochs "$EPOCHS" --num-envs "$NUM_ENVS" \
     --log-dir "${LOG_BASE}/rzsm" \
+    --disturbance-ratio 0.05 --disturbance-prob 0.3 \
     --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
 done
 

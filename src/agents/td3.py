@@ -492,16 +492,16 @@ class AdversarialTD3Agent:
         device: str = "auto",
         log_dir: str = "logs/adversarial",
         # adversary
-        disturbance_ratio: float = 0.15,
-        disturbance_probability: float = 0.5,
+        disturbance_ratio: float = 0.05,
+        disturbance_probability: float = 0.3,
         # transformer detector
         use_transformer: bool = True,
-        transformer_seq_len: int = 10,
-        transformer_d_model: int = 64,
+        transformer_seq_len: int = 20,
+        transformer_d_model: int = 128,
         transformer_nhead: int = 4,
-        transformer_layers: int = 2,
-        transformer_lr: float = 3e-4,
-        transformer_train_interval: int = 500,
+        transformer_layers: int = 3,
+        transformer_lr: float = 1e-4,
+        transformer_train_interval: int = 200,
         # pre-trained optimal policy (for blending)
         pi_opt_path: Optional[str] = None,
         num_envs: int = 1,
@@ -772,18 +772,20 @@ class AdversarialTD3Agent:
     def _collect_detector_data(
         self, obs_seq: np.ndarray, has_dist: bool, ep_return: float
     ) -> None:
+        # Alpha target: 1.0 = use optimal policy, 0.0 = use robust policy
+        # Under disturbance: use robust (low alpha); nominal: use optimal (high alpha)
         if has_dist:
-            alpha_target = np.clip(ep_return / 100.0, 0.0, 0.5)
+            alpha_target = 0.1  # strongly prefer robust policy
         else:
-            alpha_target = np.clip(0.5 + ep_return / 200.0, 0.5, 1.0)
+            alpha_target = 0.9  # strongly prefer optimal policy
         self._transformer_data.append(
             {"obs_seq": obs_seq, "dist": float(
                 has_dist), "alpha": alpha_target}
         )
-        if len(self._transformer_data) > 10_000:
+        if len(self._transformer_data) > 50_000:
             self._transformer_data.pop(0)
 
-    def _train_detector(self, batch_size: int = 64) -> Dict[str, float]:
+    def _train_detector(self, batch_size: int = 128) -> Dict[str, float]:
         if len(self._transformer_data) < batch_size:
             return {}
         idxs = np.random.choice(
@@ -944,8 +946,8 @@ class AdversarialTD3Agent:
 
                 # train transformer periodically
                 if self.use_transformer and global_step % self.transformer_train_interval < N:
-                    for _ in range(50):
-                        det_m = self._train_detector(batch_size=64)
+                    for _ in range(100):
+                        det_m = self._train_detector(batch_size=128)
                         if det_m:
                             for k, v in det_m.items():
                                 epoch_det_metrics[k].append(v)
