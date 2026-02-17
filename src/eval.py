@@ -191,15 +191,31 @@ def _infer_dims(env_id: str) -> Tuple[int, int, float]:
     return obs_dim, act_dim, act_limit
 
 
+def _infer_hidden_sizes(state_dict: dict, act_dim: int,
+                        fallback: Tuple[int, ...] = (256, 256)) -> Tuple[int, ...]:
+    """Infer MLP hidden layer sizes from a saved state_dict.
+
+    Looks at weight matrices named 'pi.N.weight' and collects the output
+    dimensions of all hidden layers (i.e. layers whose output != act_dim).
+    """
+    hidden = []
+    for key, val in state_dict.items():
+        if key.startswith("pi.") and key.endswith(".weight"):
+            if val.shape[0] != act_dim:
+                hidden.append(val.shape[0])
+    return tuple(hidden) if hidden else fallback
+
+
 def load_vanilla_policy(
     ckpt_dir: str, env_id: str, device: torch.device,
     hidden_sizes: Tuple[int, ...] = (256, 256),
 ) -> Callable[[np.ndarray], np.ndarray]:
     """Load a TD3Agent (vanilla / SA-MDP / DR) policy."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
-    pi = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
-    pi.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi.pt"),
-                                  map_location=device))
+    state = torch.load(os.path.join(ckpt_dir, "pi.pt"), map_location=device)
+    hs = _infer_hidden_sizes(state, act_dim, fallback=hidden_sizes)
+    pi = MLPActor(obs_dim, act_dim, hs, nn.ReLU, act_limit).to(device)
+    pi.load_state_dict(state)
     pi.eval()
 
     @torch.no_grad()
@@ -216,9 +232,10 @@ def load_rarl_policy(
 ) -> Callable[[np.ndarray], np.ndarray]:
     """Load an AdversarialTD3Agent and use only pi_rob (no detector)."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
-    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
-    pi_rob.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),
-                                      map_location=device))
+    state = torch.load(os.path.join(ckpt_dir, "pi_rob.pt"), map_location=device)
+    hs = _infer_hidden_sizes(state, act_dim, fallback=hidden_sizes)
+    pi_rob = MLPActor(obs_dim, act_dim, hs, nn.ReLU, act_limit).to(device)
+    pi_rob.load_state_dict(state)
     pi_rob.eval()
 
     @torch.no_grad()
@@ -243,25 +260,22 @@ def load_rzsm_policy(
     """Load full RZSM: pi_opt + pi_rob + transformer detector with blending."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
 
-    # Auto-detect pi_opt architecture from saved weights (vanilla may differ)
+    # Auto-detect architectures from saved weights
     pi_opt_state = torch.load(os.path.join(pi_opt_ckpt_dir, "pi.pt"),
                               map_location=device)
-    pi_opt_hidden = []
-    for key, val in pi_opt_state.items():
-        if key.startswith("pi.") and key.endswith(".weight"):
-            if val.shape[0] != act_dim:
-                pi_opt_hidden.append(val.shape[0])
-    pi_opt_hs = tuple(pi_opt_hidden) if pi_opt_hidden else hidden_sizes
+    pi_rob_state = torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),
+                              map_location=device)
+    pi_opt_hs = _infer_hidden_sizes(pi_opt_state, act_dim, fallback=hidden_sizes)
+    pi_rob_hs = _infer_hidden_sizes(pi_rob_state, act_dim, fallback=hidden_sizes)
 
     pi_opt = MLPActor(obs_dim, act_dim, pi_opt_hs, nn.ReLU, act_limit).to(device)
-    pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
+    pi_rob = MLPActor(obs_dim, act_dim, pi_rob_hs, nn.ReLU, act_limit).to(device)
     detector = TransformerDisturbanceDetector(
         obs_dim, seq_len, d_model, nhead, num_layers,
     ).to(device)
 
     pi_opt.load_state_dict(pi_opt_state)
-    pi_rob.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),
-                                      map_location=device))
+    pi_rob.load_state_dict(pi_rob_state)
     detector.load_state_dict(torch.load(os.path.join(ckpt_dir, "detector.pt"),
                                         map_location=device))
     pi_opt.eval()
