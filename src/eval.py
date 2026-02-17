@@ -89,9 +89,22 @@ _DISTURBANCE_PROFILES: Dict[str, Dict[str, Any]] = {
                                   "force_duration": 8,
                                   "mass_range": 0.5, "friction_range": 0.5,
                                   "damping_range": 0.5, "noise_std": 0.10},
+    # --- Complex locomotion (Ant, Humanoid) ---
+    "Ant-v5":                    {"force_mag": 100.0, "interval": (30, 100),
+                                  "force_duration": 10,
+                                  "mass_range": 0.4, "friction_range": 0.4,
+                                  "damping_range": 0.4, "noise_std": 0.10},
+    "Humanoid-v5":               {"force_mag": 80.0, "interval": (20, 60),
+                                  "force_duration": 8,
+                                  "mass_range": 0.4, "friction_range": 0.4,
+                                  "damping_range": 0.4, "noise_std": 0.10},
+    "HumanoidStandup-v5":        {"force_mag": 80.0, "interval": (20, 60),
+                                  "force_duration": 8,
+                                  "mass_range": 0.4, "friction_range": 0.4,
+                                  "damping_range": 0.4, "noise_std": 0.10},
 }
 
-# Default profile for complex locomotion envs (Ant, Humanoid, etc.)
+# Default profile for unknown environments
 _DEFAULT_PROFILE: Dict[str, Any] = {
     "force_mag": 50.0, "interval": (50, 200),
     "mass_range": 0.3, "friction_range": 0.3,
