@@ -171,10 +171,11 @@ else
     echo "  [dr] seed=$seed"
     python -m src.baselines.domain_randomization --env "$ENV" --seed "$seed" \
       --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
-    --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
-    --num-envs "$NUM_ENVS" --device "$DEVICE" \
-    --log-dir "${LOG_BASE}/dr/seed_${seed}"
-done
+      --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
+      --num-envs "$NUM_ENVS" --device "$DEVICE" \
+      --log-dir "${LOG_BASE}/dr/seed_${seed}"
+  done
+fi
 
 TRAIN_END=$(date +%s)
 TRAIN_ELAPSED=$(( TRAIN_END - TRAIN_START ))

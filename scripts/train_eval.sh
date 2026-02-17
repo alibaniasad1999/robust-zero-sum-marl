@@ -180,10 +180,67 @@ else
   done
 fi
 
+# ── Load best RZSM hyperparams from sweep (or use defaults) ──────────
+SWEEP_CSV="${LOG_BASE}/sweep_rzsm/sweep_results.csv"
+
+HIDDEN_SIZES="256,256"
+SEQ_LEN=20
+D_MODEL=128
+NHEAD=4
+TF_LAYERS=3
+DET_LR="1e-4"
+DET_INTERVAL=200
+DIST_RATIO=0.05
+DIST_PROB=0.3
+SWEEP_CONFIG="(defaults)"
+
+if [[ -f "$SWEEP_CSV" ]]; then
+  echo ""
+  echo ">>> Found sweep results: $SWEEP_CSV"
+  BEST_LINE=$(python3 -c "
+import csv, sys
+best, best_row = -float('inf'), None
+with open('$SWEEP_CSV') as f:
+    for row in csv.DictReader(f):
+        try:
+            val = float(row['eval_nominal'])
+        except (ValueError, KeyError):
+            continue
+        if val > best:
+            best, best_row = val, row
+if best_row is None:
+    sys.exit(1)
+print('|'.join([
+    best_row['config'],
+    best_row['hidden_sizes'],
+    best_row['seq_len'],
+    best_row['d_model'],
+    best_row['nhead'],
+    best_row['layers'],
+    best_row['det_lr'],
+    best_row['det_interval'],
+    best_row['dist_ratio'],
+    best_row['dist_prob'],
+    str(best),
+]))
+" 2>/dev/null) || true
+
+  if [[ -n "$BEST_LINE" ]]; then
+    IFS='|' read -r SWEEP_CONFIG HIDDEN_SIZES SEQ_LEN D_MODEL NHEAD TF_LAYERS \
+                     DET_LR DET_INTERVAL DIST_RATIO DIST_PROB BEST_EVAL <<< "$BEST_LINE"
+    echo "  Best RZSM config: $SWEEP_CONFIG  (eval_nominal=$BEST_EVAL)"
+  else
+    echo "  [WARN] Could not parse sweep results — using RZSM defaults."
+  fi
+else
+  echo ""
+  echo ">>> No RZSM sweep results — using default hyperparameters."
+fi
+
 # ── Phase 5: RZSM (adversarial + transformer) ─────────────────────────
 # Always retrain RZSM (our method)
 echo ""
-echo ">>> [5/5] Training RZSM policies..."
+echo ">>> [5/5] Training RZSM policies (config: $SWEEP_CONFIG)..."
 rm -rf "${LOG_BASE}/rzsm" 2>/dev/null
 for seed in $(seq 0 $((SEEDS - 1))); do
   echo "  [rzsm] seed=$seed"
@@ -192,7 +249,11 @@ for seed in $(seq 0 $((SEEDS - 1))); do
     --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
     --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/rzsm" \
-    --disturbance-ratio 0.05 --disturbance-prob 0.3 \
+    --hidden-sizes "$HIDDEN_SIZES" \
+    --seq-len "$SEQ_LEN" --d-model "$D_MODEL" --nhead "$NHEAD" \
+    --transformer-layers "$TF_LAYERS" --detector-lr "$DET_LR" \
+    --detector-train-interval "$DET_INTERVAL" \
+    --disturbance-ratio "$DIST_RATIO" --disturbance-prob "$DIST_PROB" \
     --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
 done
 
@@ -209,7 +270,10 @@ python -m src.eval \
   --episodes "$EVAL_EPS" \
   --checkpoint-dir "$LOG_BASE" \
   --device "$DEVICE" \
-  --output results/
+  --output results/ \
+  --hidden-sizes "$HIDDEN_SIZES" \
+  --seq-len "$SEQ_LEN" --d-model "$D_MODEL" \
+  --transformer-layers "$TF_LAYERS"
 
 # ── Phase 7: Plots ───────────────────────────────────────────────────
 echo ""

@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Train RZSM (our method), evaluate all methods, and plot.
 #
+# Automatically loads best hyperparameters from sweep results if available:
+#   logs/<env>/sweep_rzsm/sweep_results.csv
+# If no sweep results exist, uses default hyperparameters.
+#
+# Recommended workflow:
+#   1. bash scripts/train_baselines.sh --env <ENV>     # train baselines first
+#   2. bash scripts/sweep_rzsm.sh --env <ENV>          # find best hyperparams
+#   3. bash scripts/train_rzsm.sh --env <ENV>          # auto-uses best config
+#
 # Requires vanilla checkpoints to already exist in logs/<env>/vanilla/.
-# Train baselines first:  bash scripts/train_baselines.sh --env <ENV>
 #
 # Saves checkpoints to: logs/<env>/rzsm/seed_*/
 #
@@ -89,6 +97,73 @@ if [[ ! -d "$VANILLA_DIR" ]]; then
   exit 1
 fi
 
+# ── Load best hyperparams from sweep (or use defaults) ───────────────
+SWEEP_CSV="${LOG_BASE}/sweep_rzsm/sweep_results.csv"
+
+# Defaults (same as sweep "baseline" config)
+HIDDEN_SIZES="256,256"
+SEQ_LEN=20
+D_MODEL=128
+NHEAD=4
+TF_LAYERS=3
+DET_LR="1e-4"
+DET_INTERVAL=200
+DIST_RATIO=0.05
+DIST_PROB=0.3
+SWEEP_CONFIG="(defaults)"
+
+if [[ -f "$SWEEP_CSV" ]]; then
+  echo ""
+  echo ">>> Found sweep results: $SWEEP_CSV"
+  echo ">>> Selecting best config by eval_nominal..."
+
+  # Python one-liner: read CSV, find row with highest eval_nominal, print pipe-separated params
+  BEST_LINE=$(python3 -c "
+import csv, sys
+best, best_row = -float('inf'), None
+with open('$SWEEP_CSV') as f:
+    for row in csv.DictReader(f):
+        try:
+            val = float(row['eval_nominal'])
+        except (ValueError, KeyError):
+            continue
+        if val > best:
+            best, best_row = val, row
+if best_row is None:
+    sys.exit(1)
+print('|'.join([
+    best_row['config'],
+    best_row['hidden_sizes'],
+    best_row['seq_len'],
+    best_row['d_model'],
+    best_row['nhead'],
+    best_row['layers'],
+    best_row['det_lr'],
+    best_row['det_interval'],
+    best_row['dist_ratio'],
+    best_row['dist_prob'],
+    str(best),
+]))
+" 2>/dev/null) || true
+
+  if [[ -n "$BEST_LINE" ]]; then
+    IFS='|' read -r SWEEP_CONFIG HIDDEN_SIZES SEQ_LEN D_MODEL NHEAD TF_LAYERS \
+                     DET_LR DET_INTERVAL DIST_RATIO DIST_PROB BEST_EVAL <<< "$BEST_LINE"
+    echo "  Best config:   $SWEEP_CONFIG  (eval_nominal=$BEST_EVAL)"
+    echo "  hidden=$HIDDEN_SIZES  seq=$SEQ_LEN  d_model=$D_MODEL  nhead=$NHEAD  layers=$TF_LAYERS"
+    echo "  det_lr=$DET_LR  det_interval=$DET_INTERVAL  dist_ratio=$DIST_RATIO  dist_prob=$DIST_PROB"
+  else
+    echo "  [WARN] Could not parse sweep results — using defaults."
+    SWEEP_CONFIG="(defaults)"
+  fi
+else
+  echo ""
+  echo ">>> No sweep results found at: $SWEEP_CSV"
+  echo ">>> Using default hyperparameters."
+  echo ">>> Tip: run sweep first:  bash scripts/sweep_rzsm.sh --env $ENV"
+fi
+
+echo ""
 echo "=========================================="
 echo "  Train RZSM"
 echo "  Env:       $ENV"
@@ -97,6 +172,10 @@ echo "  Seeds:     $SEEDS"
 echo "  Num envs:  $NUM_ENVS"
 echo "  Device:    $DEVICE"
 echo "  Vanilla:   $VANILLA_DIR"
+echo "  Config:    $SWEEP_CONFIG"
+echo "  hidden=$HIDDEN_SIZES  seq=$SEQ_LEN  d_model=$D_MODEL"
+echo "  nhead=$NHEAD  layers=$TF_LAYERS  det_lr=$DET_LR  det_int=$DET_INTERVAL"
+echo "  dist_ratio=$DIST_RATIO  dist_prob=$DIST_PROB"
 echo "  Log dir:   $LOG_BASE/rzsm"
 echo "=========================================="
 
@@ -125,7 +204,11 @@ for seed in $(seq 0 $((SEEDS - 1))); do
     --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
     --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/rzsm" \
-    --disturbance-ratio 0.05 --disturbance-prob 0.3 \
+    --hidden-sizes "$HIDDEN_SIZES" \
+    --seq-len "$SEQ_LEN" --d-model "$D_MODEL" --nhead "$NHEAD" \
+    --transformer-layers "$TF_LAYERS" --detector-lr "$DET_LR" \
+    --detector-train-interval "$DET_INTERVAL" \
+    --disturbance-ratio "$DIST_RATIO" --disturbance-prob "$DIST_PROB" \
     --pi-opt-path "$PI_OPT"
 done
 
@@ -134,17 +217,25 @@ TRAIN_ELAPSED=$(( TRAIN_END - TRAIN_START ))
 echo ""
 echo ">>> RZSM training complete in ${TRAIN_ELAPSED}s"
 
-# ── Evaluation: all 5 methods ────────────────────────────────────────
+# ── Evaluation: all available methods ────────────────────────────────
 echo ""
-METHODS="vanilla,rarl,sa_mdp,dr,rzsm"
-echo ">>> Running evaluation on all methods ($EVAL_EPS episodes per seed)..."
+METHODS="rzsm"
+for m in vanilla rarl sa_mdp dr; do
+  if [[ -d "${LOG_BASE}/${m}" ]]; then
+    METHODS="${METHODS},${m}"
+  fi
+done
+echo ">>> Running evaluation on methods: $METHODS ($EVAL_EPS episodes per seed)..."
 python -m src.eval \
   --env "$ENV" \
   --methods "$METHODS" \
   --episodes "$EVAL_EPS" \
   --checkpoint-dir "$LOG_BASE" \
   --device "$DEVICE" \
-  --output results/
+  --output results/ \
+  --hidden-sizes "$HIDDEN_SIZES" \
+  --seq-len "$SEQ_LEN" --d-model "$D_MODEL" \
+  --transformer-layers "$TF_LAYERS"
 
 # ── Plots ────────────────────────────────────────────────────────────
 echo ""
@@ -161,6 +252,7 @@ echo "=========================================="
 echo "  RZSM done!"
 echo "  Training:    ${TRAIN_ELAPSED}s"
 echo "  Total:       ${TOTAL_ELAPSED}s"
+echo "  Config:      $SWEEP_CONFIG"
 echo "  Checkpoints: ${LOG_BASE}/rzsm/seed_*/"
 echo "  Results:     results/${ENV_SAFE}/"
 echo "=========================================="
