@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# Full pipeline: train all methods, evaluate, and plot for one environment.
+# Train RZSM (our method), evaluate all methods, and plot.
 #
-# Python-style named arguments. Default: 1M steps, 100 envs, cuda.
+# Requires vanilla checkpoints to already exist in logs/<env>/vanilla/.
+# Train baselines first:  bash scripts/train_baselines.sh --env <ENV>
+#
+# Saves checkpoints to: logs/<env>/rzsm/seed_*/
 #
 # Usage:
-#   bash scripts/train_eval.sh --env HalfCheetah-v5
-#   bash scripts/train_eval.sh --env Ant-v5 --steps 2000000 --seeds 3
-#   bash scripts/train_eval.sh --env Walker2d-v5 --steps 500000 --device cpu
-#
-# Arguments:
-#   --env        Gymnasium environment ID       (required)
-#   --steps      Total training steps           (default: 1000000)
-#   --seeds      Number of random seeds         (default: 5)
-#   --num-envs   Parallel vectorized envs       (default: 100)
-#   --device     Torch device                   (default: cuda)
-#   --eval-eps   Eval episodes per seed         (default: 10)
-#   --run        Force run number               (default: auto-increment)
+#   bash scripts/train_rzsm.sh --env HalfCheetah-v5
+#   bash scripts/train_rzsm.sh --env Ant-v5 --steps 2000000 --seeds 3
+#   bash scripts/train_rzsm.sh --env Walker2d-v5 --device cpu --num-envs 4
 
 set -euo pipefail
 
@@ -34,7 +28,6 @@ SEEDS=5
 NUM_ENVS=100
 DEVICE="cuda"
 EVAL_EPS=10
-RUN_NUM_ARG=""
 
 # ── Parse named arguments ────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -45,9 +38,10 @@ while [[ $# -gt 0 ]]; do
     --num-envs)   NUM_ENVS="$2";   shift 2 ;;
     --device)     DEVICE="$2";     shift 2 ;;
     --eval-eps)   EVAL_EPS="$2";   shift 2 ;;
-    --run)        RUN_NUM_ARG="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: bash scripts/train_eval.sh --env <ENV> [OPTIONS]"
+      echo "Usage: bash scripts/train_rzsm.sh --env <ENV> [OPTIONS]"
+      echo ""
+      echo "Train RZSM (requires vanilla checkpoints from train_baselines.sh)."
       echo ""
       echo "Options:"
       echo "  --env        Gymnasium environment ID       (required)"
@@ -56,7 +50,6 @@ while [[ $# -gt 0 ]]; do
       echo "  --num-envs   Parallel vectorized envs       (default: 100)"
       echo "  --device     Torch device                   (default: cuda)"
       echo "  --eval-eps   Eval episodes per seed         (default: 10)"
-      echo "  --run        Force run number               (default: auto)"
       exit 0
       ;;
     *)
@@ -69,16 +62,11 @@ done
 
 if [[ -z "$ENV" ]]; then
   echo "ERROR: --env is required."
-  echo "Usage: bash scripts/train_eval.sh --env HalfCheetah-v5 [OPTIONS]"
+  echo "Usage: bash scripts/train_rzsm.sh --env HalfCheetah-v5"
   exit 1
 fi
 
 # ── Compute steps_per_epoch and epochs ────────────────────────────────
-# steps_per_epoch counts TOTAL transitions (across all envs).
-# Each env takes steps_per_epoch/num_envs steps per epoch.
-# MuJoCo episodes are 1000 steps → need steps_per_epoch >= num_envs*1000
-# so at least 1 episode completes per env per epoch.
-# With many envs (e.g. 100), 1 ep/env/epoch = 100 episodes for logging.
 STEPS_PER_EPOCH=$(( NUM_ENVS * 1000 ))
 if (( STEPS_PER_EPOCH < 4000 )); then
   STEPS_PER_EPOCH=4000
@@ -87,81 +75,80 @@ EPOCHS=$(( STEPS / STEPS_PER_EPOCH ))
 if (( EPOCHS < 1 )); then
   EPOCHS=1
 fi
-
-# Exploration warmup: fill buffer with ~25K random transitions
-# (enough diversity regardless of num_envs)
 START_STEPS=25000
 UPDATE_AFTER=25000
 
 ENV_SAFE="${ENV//-/_}"
-ENV_DIR="logs/${ENV_SAFE}"
+LOG_BASE="logs/${ENV_SAFE}"
 
-# ── Determine run number ─────────────────────────────────────────────
-mkdir -p "$ENV_DIR"
-if [[ -n "$RUN_NUM_ARG" ]]; then
-  RUN_NUM="$RUN_NUM_ARG"
-else
-  RUN_NUM=0
-  for d in "$ENV_DIR"/run_*; do
-    if [[ -d "$d" ]]; then
-      n="${d##*run_}"
-      if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= RUN_NUM )); then
-        RUN_NUM=$(( n + 1 ))
-      fi
-    fi
-  done
+# ── Check that vanilla checkpoints exist ─────────────────────────────
+VANILLA_DIR="${LOG_BASE}/vanilla"
+if [[ ! -d "$VANILLA_DIR" ]]; then
+  echo "ERROR: Vanilla checkpoints not found at: $VANILLA_DIR"
+  echo "  Train baselines first:  bash scripts/train_baselines.sh --env $ENV"
+  exit 1
 fi
 
-LOG_BASE="${ENV_DIR}/run_${RUN_NUM}"
-RESULTS_DIR="results/${ENV_SAFE}"
-mkdir -p "$LOG_BASE"
-
 echo "=========================================="
-echo "  Full Train + Eval Pipeline"
+echo "  Train RZSM"
 echo "  Env:       $ENV"
 echo "  Steps:     $STEPS  (${EPOCHS} epochs x ${STEPS_PER_EPOCH})"
 echo "  Seeds:     $SEEDS"
 echo "  Num envs:  $NUM_ENVS"
 echo "  Device:    $DEVICE"
-echo "  Eval eps:  $EVAL_EPS"
-echo "  Run:       $RUN_NUM"
-echo "  Log dir:   $LOG_BASE"
+echo "  Vanilla:   $VANILLA_DIR"
+echo "  Log dir:   $LOG_BASE/rzsm"
 echo "=========================================="
 
 TRAIN_START=$(date +%s)
 
-# ── Phase 1: RZSM (adversarial + transformer) ─────────────────────────
+# ── Delete old RZSM before training ──────────────────────────────────
+if [[ -d "${LOG_BASE}/rzsm" ]]; then
+  echo ""
+  echo ">>> Cleaning old RZSM checkpoints..."
+  rm -rf "${LOG_BASE}/rzsm"
+  echo "  Removed ${LOG_BASE}/rzsm"
+fi
+
+# ── Train RZSM ───────────────────────────────────────────────────────
 echo ""
-echo ">>> [1/1] Training RZSM policies..."
+echo ">>> Training RZSM policies..."
 for seed in $(seq 0 $((SEEDS - 1))); do
-  echo "  [rzsm] seed=$seed"
+  PI_OPT="${VANILLA_DIR}/seed_${seed}/checkpoints"
+  if [[ ! -d "$PI_OPT" ]]; then
+    echo "  [WARN] No vanilla seed_${seed} checkpoint, skipping."
+    continue
+  fi
+  echo "  [rzsm] seed=$seed  (pi_opt from vanilla/seed_${seed})"
   python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
     --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
     --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
     --num-envs "$NUM_ENVS" --device "$DEVICE" \
     --log-dir "${LOG_BASE}/rzsm" \
     --disturbance-ratio 0.05 --disturbance-prob 0.3 \
-    --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
+    --pi-opt-path "$PI_OPT"
 done
 
 TRAIN_END=$(date +%s)
 TRAIN_ELAPSED=$(( TRAIN_END - TRAIN_START ))
 echo ""
-echo ">>> Training complete in ${TRAIN_ELAPSED}s"
+echo ">>> RZSM training complete in ${TRAIN_ELAPSED}s"
 
-# ── Phase 2: Evaluation ──────────────────────────────────────────────
+# ── Evaluation: all 5 methods ────────────────────────────────────────
 echo ""
-echo ">>> [2/2] Running evaluation ($EVAL_EPS episodes per seed)..."
+METHODS="vanilla,rarl,sa_mdp,dr,rzsm"
+echo ">>> Running evaluation on all methods ($EVAL_EPS episodes per seed)..."
 python -m src.eval \
   --env "$ENV" \
+  --methods "$METHODS" \
   --episodes "$EVAL_EPS" \
   --checkpoint-dir "$LOG_BASE" \
   --device "$DEVICE" \
   --output results/
 
-# ── Phase 3: Plots ───────────────────────────────────────────────────
+# ── Plots ────────────────────────────────────────────────────────────
 echo ""
-echo ">>> [3/3] Generating plots..."
+echo ">>> Generating plots..."
 python scripts/plot_results.py \
   --env "$ENV" \
   --log-dir logs
@@ -171,11 +158,9 @@ TOTAL_ELAPSED=$(( TOTAL_END - TRAIN_START ))
 
 echo ""
 echo "=========================================="
-echo "  All done!  (run $RUN_NUM)"
-echo "  Training:  ${TRAIN_ELAPSED}s"
-echo "  Total:     ${TOTAL_ELAPSED}s"
+echo "  RZSM done!"
+echo "  Training:    ${TRAIN_ELAPSED}s"
+echo "  Total:       ${TOTAL_ELAPSED}s"
 echo "  Checkpoints: ${LOG_BASE}/rzsm/seed_*/"
-echo "  CSVs:        $RESULTS_DIR/comparison_table.csv"
-echo "               $RESULTS_DIR/per_seed_results.csv"
-echo "  Figures:     $RESULTS_DIR/figures/"
+echo "  Results:     results/${ENV_SAFE}/"
 echo "=========================================="

@@ -479,6 +479,19 @@ def aggregate_seed_results(
 # Main
 # ======================================================================
 
+def _resolve_method_dir(method: str, args) -> str:
+    """Return the checkpoint directory for a given method.
+
+    Supports --checkpoint-dirs for per-method overrides, e.g.:
+        --checkpoint-dirs rzsm=/path/to/rzsm,vanilla=/path/to/vanilla
+    Falls back to <checkpoint-dir>/<method>.
+    """
+    overrides = getattr(args, "checkpoint_dirs_map", {})
+    if method in overrides:
+        return overrides[method]
+    return os.path.join(args.checkpoint_dir, method)
+
+
 def run_evaluation(args) -> None:
     device = torch.device(
         "cuda" if args.device == "auto" and torch.cuda.is_available()
@@ -486,6 +499,15 @@ def run_evaluation(args) -> None:
     )
     methods = [m.strip() for m in args.methods.split(",")]
     scenarios = [s.strip() for s in args.scenarios.split(",")]
+
+    # Parse --checkpoint-dirs overrides into a dict
+    args.checkpoint_dirs_map = {}
+    if args.checkpoint_dirs:
+        for entry in args.checkpoint_dirs.split(","):
+            entry = entry.strip()
+            if "=" in entry:
+                k, v = entry.split("=", 1)
+                args.checkpoint_dirs_map[k.strip()] = v.strip()
 
     os.makedirs(args.output, exist_ok=True)
     env_out_dir = os.path.join(args.output, args.env.replace("-", "_"))
@@ -499,7 +521,7 @@ def run_evaluation(args) -> None:
         print(f"  Method: {method}")
         print(f"{'='*60}")
 
-        method_dir = os.path.join(args.checkpoint_dir, method)
+        method_dir = _resolve_method_dir(method, args)
         seed_dirs = discover_seed_dirs(method_dir)
 
         if not seed_dirs:
@@ -518,14 +540,17 @@ def run_evaluation(args) -> None:
                 seed_name = os.path.basename(os.path.dirname(ckpt_dir))
 
                 # Load policy for this seed
+                hidden = getattr(args, "hidden_sizes", (256, 256))
                 rzsm_state = None
                 if method in ("vanilla", "sa_mdp", "dr"):
-                    policy_fn = load_vanilla_policy(ckpt_dir, args.env, device)
+                    policy_fn = load_vanilla_policy(
+                        ckpt_dir, args.env, device, hidden_sizes=hidden)
                 elif method == "rarl":
-                    policy_fn = load_rarl_policy(ckpt_dir, args.env, device)
+                    policy_fn = load_rarl_policy(
+                        ckpt_dir, args.env, device, hidden_sizes=hidden)
                 elif method == "rzsm":
                     # Find matching pi_opt seed directory
-                    pi_opt_base = os.path.join(args.checkpoint_dir, "vanilla")
+                    pi_opt_base = _resolve_method_dir("vanilla", args)
                     if args.pi_opt_dir:
                         pi_opt_dir = args.pi_opt_dir
                     else:
@@ -539,6 +564,10 @@ def run_evaluation(args) -> None:
                                 os.path.join(pi_opt_base, "checkpoints")
                     policy_fn, rzsm_state = load_rzsm_policy(
                         ckpt_dir, pi_opt_dir, args.env, device,
+                        hidden_sizes=hidden,
+                        seq_len=getattr(args, "seq_len", 20),
+                        d_model=getattr(args, "d_model", 128),
+                        num_layers=getattr(args, "transformer_layers", 3),
                     )
                 else:
                     print(f"  [SKIP] Unknown method: {method}")
@@ -684,7 +713,18 @@ def main() -> None:
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--pi-opt-dir", type=str, default=None,
                     help="Override pi_opt checkpoint dir for RZSM")
+    p.add_argument("--checkpoint-dirs", type=str, default=None,
+                    help="Per-method checkpoint overrides, e.g. "
+                         "'rzsm=logs/env/rzsm,vanilla=logs/env/vanilla'. "
+                         "Methods not listed fall back to --checkpoint-dir/<method>.")
+    # Network / detector architecture (must match training)
+    p.add_argument("--hidden-sizes", type=str, default="256,256",
+                    help="Comma-separated MLP hidden sizes (default: 256,256)")
+    p.add_argument("--seq-len", type=int, default=20)
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--transformer-layers", type=int, default=3)
     args = p.parse_args()
+    args.hidden_sizes = tuple(int(x) for x in args.hidden_sizes.split(","))
 
     # Default checkpoint-dir uses env name
     if args.checkpoint_dir is None:

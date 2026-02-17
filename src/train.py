@@ -55,7 +55,18 @@ def main() -> None:
                     help="Path to pre-trained optimal policy checkpoints (for blending)")
     p.add_argument("--no-transformer", action="store_true",
                     help="Disable transformer disturbance detector")
+    # network architecture
+    p.add_argument("--hidden-sizes", type=str, default="256,256",
+                    help="Comma-separated MLP hidden layer sizes (default: 256,256)")
+    # transformer detector hyperparameters
+    p.add_argument("--seq-len", type=int, default=20)
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--nhead", type=int, default=4)
+    p.add_argument("--transformer-layers", type=int, default=3)
+    p.add_argument("--detector-lr", type=float, default=1e-4)
+    p.add_argument("--detector-train-interval", type=int, default=200)
     args = p.parse_args()
+    args.hidden_sizes = tuple(int(x) for x in args.hidden_sizes.split(","))
 
     env_fn = make_env(args.env)
     env_safe = args.env.replace("-", "_")
@@ -65,6 +76,7 @@ def main() -> None:
     if args.mode == "nominal":
         agent = TD3Agent(
             env_fn,
+            hidden_sizes=args.hidden_sizes,
             seed=args.seed,
             epochs=args.epochs,
             steps_per_epoch=args.steps_per_epoch,
@@ -78,6 +90,7 @@ def main() -> None:
     else:
         agent = AdversarialTD3Agent(
             env_fn,
+            hidden_sizes=args.hidden_sizes,
             seed=args.seed,
             epochs=args.epochs,
             steps_per_epoch=args.steps_per_epoch,
@@ -91,6 +104,12 @@ def main() -> None:
             disturbance_probability=args.disturbance_prob,
             use_transformer=not args.no_transformer,
             pi_opt_path=args.pi_opt_path,
+            transformer_seq_len=args.seq_len,
+            transformer_d_model=args.d_model,
+            transformer_nhead=args.nhead,
+            transformer_layers=args.transformer_layers,
+            transformer_lr=args.detector_lr,
+            transformer_train_interval=args.detector_train_interval,
         )
 
     agent.train()

@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Train ALL methods (vanilla, rarl, sa_mdp, dr, rzsm), evaluate, and plot.
+# Train baseline methods (vanilla, rarl, sa_mdp, dr), evaluate all, and plot.
 #
-# Saves checkpoints to: logs/<env>/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/
-#
-# For training baselines and RZSM separately, use:
-#   bash scripts/train_baselines.sh --env <ENV>
-#   bash scripts/train_rzsm.sh --env <ENV>
+# Saves checkpoints to: logs/<env>/{vanilla,rarl,sa_mdp,dr}/seed_*/
+# If RZSM checkpoints exist in logs/<env>/rzsm/, they are included in eval.
 #
 # Usage:
-#   bash scripts/train_eval.sh --env HalfCheetah-v5
-#   bash scripts/train_eval.sh --env Ant-v5 --steps 2000000 --seeds 3
-#   bash scripts/train_eval.sh --env Walker2d-v5 --device cpu --num-envs 4
+#   bash scripts/train_baselines.sh --env HalfCheetah-v5
+#   bash scripts/train_baselines.sh --env Ant-v5 --steps 2000000 --seeds 3
+#   bash scripts/train_baselines.sh --env Walker2d-v5 --device cpu --num-envs 4
 
 set -euo pipefail
 
@@ -40,9 +37,9 @@ while [[ $# -gt 0 ]]; do
     --device)     DEVICE="$2";     shift 2 ;;
     --eval-eps)   EVAL_EPS="$2";   shift 2 ;;
     -h|--help)
-      echo "Usage: bash scripts/train_eval.sh --env <ENV> [OPTIONS]"
+      echo "Usage: bash scripts/train_baselines.sh --env <ENV> [OPTIONS]"
       echo ""
-      echo "Train all methods (vanilla, rarl, sa_mdp, dr, rzsm), eval, and plot."
+      echo "Train baseline methods (vanilla, rarl, sa_mdp, dr), eval, and plot."
       echo ""
       echo "Options:"
       echo "  --env        Gymnasium environment ID       (required)"
@@ -63,7 +60,7 @@ done
 
 if [[ -z "$ENV" ]]; then
   echo "ERROR: --env is required."
-  echo "Usage: bash scripts/train_eval.sh --env HalfCheetah-v5"
+  echo "Usage: bash scripts/train_baselines.sh --env HalfCheetah-v5"
   exit 1
 fi
 
@@ -84,7 +81,7 @@ LOG_BASE="logs/${ENV_SAFE}"
 mkdir -p "$LOG_BASE"
 
 echo "=========================================="
-echo "  Train All + Eval Pipeline"
+echo "  Train Baselines"
 echo "  Env:       $ENV"
 echo "  Steps:     $STEPS  (${EPOCHS} epochs x ${STEPS_PER_EPOCH})"
 echo "  Seeds:     $SEEDS"
@@ -100,22 +97,22 @@ method_already_trained() {
   local method_dir="$1"
   local needed_seeds="$2"
   if [[ ! -d "$method_dir" ]]; then
-    return 1
+    return 1  # not trained
   fi
   for seed in $(seq 0 $((needed_seeds - 1))); do
     if [[ ! -d "${method_dir}/seed_${seed}/checkpoints" ]]; then
-      return 1
+      return 1  # missing seed
     fi
   done
-  return 0
+  return 0  # all seeds present
 }
 
 # ── Phase 1: Vanilla (nominal) ────────────────────────────────────────
 echo ""
 if method_already_trained "${LOG_BASE}/vanilla" "$SEEDS"; then
-  echo ">>> [1/5] SKIP vanilla — already trained (${LOG_BASE}/vanilla)"
+  echo ">>> [1/4] SKIP vanilla — already trained (${LOG_BASE}/vanilla)"
 else
-  echo ">>> [1/5] Training vanilla (nominal) policies..."
+  echo ">>> [1/4] Training vanilla (nominal) policies..."
   rm -rf "${LOG_BASE}/vanilla" 2>/dev/null
   for seed in $(seq 0 $((SEEDS - 1))); do
     echo "  [vanilla] seed=$seed"
@@ -130,9 +127,9 @@ fi
 # ── Phase 2: RARL (adversarial, no transformer) ───────────────────────
 echo ""
 if method_already_trained "${LOG_BASE}/rarl" "$SEEDS"; then
-  echo ">>> [2/5] SKIP rarl — already trained (${LOG_BASE}/rarl)"
+  echo ">>> [2/4] SKIP rarl — already trained (${LOG_BASE}/rarl)"
 else
-  echo ">>> [2/5] Training RARL policies..."
+  echo ">>> [2/4] Training RARL policies..."
   rm -rf "${LOG_BASE}/rarl" 2>/dev/null
   for seed in $(seq 0 $((SEEDS - 1))); do
     echo "  [rarl] seed=$seed"
@@ -149,9 +146,9 @@ fi
 # ── Phase 3: SA-MDP ───────────────────────────────────────────────────
 echo ""
 if method_already_trained "${LOG_BASE}/sa_mdp" "$SEEDS"; then
-  echo ">>> [3/5] SKIP sa_mdp — already trained (${LOG_BASE}/sa_mdp)"
+  echo ">>> [3/4] SKIP sa_mdp — already trained (${LOG_BASE}/sa_mdp)"
 else
-  echo ">>> [3/5] Training SA-MDP policies..."
+  echo ">>> [3/4] Training SA-MDP policies..."
   rm -rf "${LOG_BASE}/sa_mdp" 2>/dev/null
   for seed in $(seq 0 $((SEEDS - 1))); do
     echo "  [sa_mdp] seed=$seed"
@@ -166,52 +163,43 @@ fi
 # ── Phase 4: Domain Randomization ─────────────────────────────────────
 echo ""
 if method_already_trained "${LOG_BASE}/dr" "$SEEDS"; then
-  echo ">>> [4/5] SKIP dr — already trained (${LOG_BASE}/dr)"
+  echo ">>> [4/4] SKIP dr — already trained (${LOG_BASE}/dr)"
 else
-  echo ">>> [4/5] Training Domain Randomization policies..."
+  echo ">>> [4/4] Training Domain Randomization policies..."
   rm -rf "${LOG_BASE}/dr" 2>/dev/null
   for seed in $(seq 0 $((SEEDS - 1))); do
     echo "  [dr] seed=$seed"
     python -m src.baselines.domain_randomization --env "$ENV" --seed "$seed" \
       --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
-      --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
-      --num-envs "$NUM_ENVS" --device "$DEVICE" \
-      --log-dir "${LOG_BASE}/dr/seed_${seed}"
-  done
-fi
-
-# ── Phase 5: RZSM (adversarial + transformer) ─────────────────────────
-# Always retrain RZSM (our method)
-echo ""
-echo ">>> [5/5] Training RZSM policies..."
-rm -rf "${LOG_BASE}/rzsm" 2>/dev/null
-for seed in $(seq 0 $((SEEDS - 1))); do
-  echo "  [rzsm] seed=$seed"
-  python -m src.train --env "$ENV" --mode adversarial --seed "$seed" \
-    --epochs "$EPOCHS" --steps-per-epoch "$STEPS_PER_EPOCH" \
     --start-steps "$START_STEPS" --update-after "$UPDATE_AFTER" \
     --num-envs "$NUM_ENVS" --device "$DEVICE" \
-    --log-dir "${LOG_BASE}/rzsm" \
-    --disturbance-ratio 0.05 --disturbance-prob 0.3 \
-    --pi-opt-path "${LOG_BASE}/vanilla/seed_${seed}/checkpoints"
+    --log-dir "${LOG_BASE}/dr/seed_${seed}"
 done
 
 TRAIN_END=$(date +%s)
 TRAIN_ELAPSED=$(( TRAIN_END - TRAIN_START ))
 echo ""
-echo ">>> Training complete in ${TRAIN_ELAPSED}s"
+echo ">>> Baseline training complete in ${TRAIN_ELAPSED}s"
 
-# ── Phase 6: Evaluation ──────────────────────────────────────────────
+# ── Phase 5: Evaluation ──────────────────────────────────────────────
 echo ""
+# Include RZSM in eval if it exists
+METHODS="vanilla,rarl,sa_mdp,dr"
+if [[ -d "${LOG_BASE}/rzsm" ]]; then
+  echo ">>> Found existing RZSM checkpoints — including in evaluation."
+  METHODS="vanilla,rarl,sa_mdp,dr,rzsm"
+fi
+
 echo ">>> Running evaluation ($EVAL_EPS episodes per seed)..."
 python -m src.eval \
   --env "$ENV" \
+  --methods "$METHODS" \
   --episodes "$EVAL_EPS" \
   --checkpoint-dir "$LOG_BASE" \
   --device "$DEVICE" \
   --output results/
 
-# ── Phase 7: Plots ───────────────────────────────────────────────────
+# ── Phase 6: Plots ───────────────────────────────────────────────────
 echo ""
 echo ">>> Generating plots..."
 python scripts/plot_results.py \
@@ -223,9 +211,9 @@ TOTAL_ELAPSED=$(( TOTAL_END - TRAIN_START ))
 
 echo ""
 echo "=========================================="
-echo "  All done!"
+echo "  Baselines done!"
 echo "  Training:    ${TRAIN_ELAPSED}s"
 echo "  Total:       ${TOTAL_ELAPSED}s"
-echo "  Checkpoints: ${LOG_BASE}/{vanilla,rarl,sa_mdp,dr,rzsm}/seed_*/"
+echo "  Checkpoints: ${LOG_BASE}/{vanilla,rarl,sa_mdp,dr}/seed_*/"
 echo "  Results:     results/${ENV_SAFE}/"
 echo "=========================================="
