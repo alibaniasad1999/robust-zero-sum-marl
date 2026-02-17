@@ -549,15 +549,28 @@ class AdversarialTD3Agent:
                   + list(self.q2_targ.parameters())):
             p.requires_grad = False
 
-        # optional optimal policy
+        # optional optimal policy (frozen, pre-trained vanilla)
         self.pi_opt: Optional[MLPActor] = None
         if pi_opt_path is not None:
+            # Auto-detect pi_opt architecture from saved weights
+            pi_opt_state = torch.load(
+                os.path.join(pi_opt_path, "pi.pt"),
+                map_location=self.device)
+            pi_opt_hidden = []
+            for key, val in pi_opt_state.items():
+                if key.startswith("pi.") and key.endswith(".weight"):
+                    # Hidden layers have square-ish shapes; output layer has act_dim rows
+                    if val.shape[0] != act_dim:
+                        pi_opt_hidden.append(val.shape[0])
+            if not pi_opt_hidden:
+                pi_opt_hidden = list(hidden_sizes)
+            pi_opt_hs = tuple(pi_opt_hidden)
+            if pi_opt_hs != hidden_sizes:
+                print(f"[AdversarialTD3] pi_opt architecture {pi_opt_hs} "
+                      f"differs from current {hidden_sizes} — using saved arch")
             self.pi_opt = MLPActor(
-                obs_dim, act_dim, hidden_sizes, activation, self.act_limit).to(self.device)
-            self.pi_opt.load_state_dict(
-                torch.load(os.path.join(pi_opt_path, "pi.pt"),
-                           map_location=self.device)
-            )
+                obs_dim, act_dim, pi_opt_hs, activation, self.act_limit).to(self.device)
+            self.pi_opt.load_state_dict(pi_opt_state)
             self.pi_opt.eval()
             for p in self.pi_opt.parameters():
                 p.requires_grad = False

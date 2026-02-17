@@ -243,14 +243,23 @@ def load_rzsm_policy(
     """Load full RZSM: pi_opt + pi_rob + transformer detector with blending."""
     obs_dim, act_dim, act_limit = _infer_dims(env_id)
 
-    pi_opt = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
+    # Auto-detect pi_opt architecture from saved weights (vanilla may differ)
+    pi_opt_state = torch.load(os.path.join(pi_opt_ckpt_dir, "pi.pt"),
+                              map_location=device)
+    pi_opt_hidden = []
+    for key, val in pi_opt_state.items():
+        if key.startswith("pi.") and key.endswith(".weight"):
+            if val.shape[0] != act_dim:
+                pi_opt_hidden.append(val.shape[0])
+    pi_opt_hs = tuple(pi_opt_hidden) if pi_opt_hidden else hidden_sizes
+
+    pi_opt = MLPActor(obs_dim, act_dim, pi_opt_hs, nn.ReLU, act_limit).to(device)
     pi_rob = MLPActor(obs_dim, act_dim, hidden_sizes, nn.ReLU, act_limit).to(device)
     detector = TransformerDisturbanceDetector(
         obs_dim, seq_len, d_model, nhead, num_layers,
     ).to(device)
 
-    pi_opt.load_state_dict(torch.load(os.path.join(pi_opt_ckpt_dir, "pi.pt"),
-                                      map_location=device))
+    pi_opt.load_state_dict(pi_opt_state)
     pi_rob.load_state_dict(torch.load(os.path.join(ckpt_dir, "pi_rob.pt"),
                                       map_location=device))
     detector.load_state_dict(torch.load(os.path.join(ckpt_dir, "detector.pt"),

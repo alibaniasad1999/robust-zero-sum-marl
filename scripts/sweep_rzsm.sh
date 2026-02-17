@@ -237,7 +237,7 @@ for cfg_str in "${CONFIGS[@]}"; do
       EVAL_COMB=$(grep "rzsm,combined" "$EVAL_CSV" | cut -d',' -f4 || echo "nan")
     fi
 
-    echo "$CFG_NAME,$HIDDEN,$SEQ,$DMODEL,$NHEAD,$LAYERS,$DET_LR,$DET_INT,$DIST_R,$DIST_P,$seed,$FINAL_RET,$MEAN_LAST3,$EVAL_NOM,$EVAL_FORCE,$EVAL_COMB" \
+    echo "$CFG_NAME,\"$HIDDEN\",$SEQ,$DMODEL,$NHEAD,$LAYERS,$DET_LR,$DET_INT,$DIST_R,$DIST_P,$seed,$FINAL_RET,$MEAN_LAST3,$EVAL_NOM,$EVAL_FORCE,$EVAL_COMB" \
       >> "$RESULTS_CSV"
 
     echo "  seed=$seed: train_return=$FINAL_RET  eval_nom=$EVAL_NOM  eval_force=$EVAL_FORCE  eval_comb=$EVAL_COMB"
