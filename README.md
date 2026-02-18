@@ -1,30 +1,41 @@
-# Robust Zero-Sum Multi-Agent Reinforcement Learning
+# Robust Zero-Sum MARL (RZSM)
 
-Zero-sum robust deep reinforcement learning with transformer-based disturbance detection and adaptive policy mixing. Includes Python training, C++ native port (LibTorch + MuJoCo), and ROS 2 deployment for NVIDIA Jetson.
+Zero-sum robust deep reinforcement learning with transformer-based disturbance detection and adaptive policy mixing. Includes Python training, a full pipeline runner, C++ native port (LibTorch + MuJoCo), and ROS 2 deployment for NVIDIA Jetson.
 
 ## Project Structure
 
 ```
 .
-├── src/                          # Python source code
-│   ├── agents/                   #   DDPG + Adversarial DDPG agents
-│   ├── detector/                 #   Transformer disturbance detector & blender
-│   ├── networks/                 #   MLP actor-critic architectures
-│   ├── utils/                    #   Replay buffer, dataset logger
-│   └── train.py                  #   Training entry point
+├── src/                          # Python source
+│   ├── agents/td3.py             #   TD3Agent (nominal) + AdversarialTD3Agent (zero-sum)
+│   ├── detector/transformer.py   #   Transformer detector, gating network, blender
+│   ├── networks/mlp.py           #   MLP actor-critic architectures
+│   ├── baselines/                #   SA-MDP + Domain Randomisation baselines
+│   ├── environments/wrappers.py  #   Disturbance wrappers (force / param / noise)
+│   ├── utils/
+│   │   ├── logger.py             #     DatasetLogger — per-step .npz episode archives
+│   │   ├── perf_logger.py        #     GPU/CPU throughput logging
+│   │   └── buffers/              #     Vectorised replay buffer
+│   ├── train.py                  #   Single-run training entry point
+│   └── eval.py                   #   Multi-scenario evaluation
+├── scripts/
+│   ├── run_pipeline.py           #   *** Full end-to-end pipeline (see below) ***
+│   ├── train_transformer.py      #   Offline transformer training on logged data
+│   ├── plot_results.py           #   Result plotting
+│   └── analyze_rzsm.py           #   Analysis utilities
 ├── cpp/                          # C++ port (LibTorch + MuJoCo C API)
 │   ├── CMakeLists.txt
-│   ├── include/rzsm/             #   Headers (namespace rzsm)
-│   ├── src/                      #   Implementation + main.cpp CLI
-│   ├── tests/                    #   GoogleTest unit tests (64 tests)
+│   ├── include/rzsm/
+│   ├── src/
+│   ├── tests/                    #   64 GoogleTest unit tests
 │   └── assets/                   #   MuJoCo XML models (ant, humanoid)
 ├── ros2_ws/                      # ROS 2 workspace (Jetson deployment)
-│   └── src/rzsm_control/         #   ROS 2 control package
-│       ├── src/                  #     Controller node (200-500 Hz)
-│       ├── msg/                  #     DetectorStatus custom message
-│       ├── config/               #     YAML parameters
-│       ├── launch/               #     Launch files
-│       └── scripts/              #     ONNX export utility
+│   └── src/rzsm_control/
+│       ├── src/                  #   Controller node (200-500 Hz)
+│       ├── msg/                  #   DetectorStatus custom message
+│       ├── config/               #   YAML parameters
+│       ├── launch/               #   Launch files
+│       └── scripts/              #   ONNX export utility
 ├── tests/                        # Python unit tests (73 tests)
 ├── notebooks/                    # Experiment notebooks (Ant, Humanoid)
 ├── pretrained/                   # Pre-trained model weights
@@ -32,6 +43,8 @@ Zero-sum robust deep reinforcement learning with transformer-based disturbance d
 ├── requirements.txt
 └── LICENSE
 ```
+
+---
 
 ## Prerequisites
 
@@ -42,7 +55,7 @@ Zero-sum robust deep reinforcement learning with transformer-based disturbance d
 | MuJoCo | 3.x | Physics simulation |
 | C++ Compiler | C++17 | GCC 9+ / Clang 14+ |
 | CMake | 3.18+ | Build system |
-| LibTorch | Matching PyTorch | C++ frontend (auto-downloaded or manual) |
+| LibTorch | Matching PyTorch | C++ frontend |
 | ROS 2 | Jazzy / Humble | Jetson deployment (optional) |
 | JetPack | 6.x | NVIDIA Jetson (optional) |
 
@@ -54,17 +67,92 @@ source .env/bin/activate
 pip install -r requirements.txt
 ```
 
-## Training
+---
 
-**Phase 1** -- Train optimal policy on nominal environment:
+## Full Pipeline (Recommended)
+
+`scripts/run_pipeline.py` runs the **complete end-to-end training sequence** automatically:
+
+1. **Baselines** — SA-MDP and Domain Randomisation (data collection + logging)
+2. **Nominal TD3** — trains `pi_opt`, logs every transition to `dataset/`
+3. **Adversarial TD3** — trains `pi_rob + pi_adv` with epsilon annealing, logs data
+4. **Offline Transformer** — trains detector on the aggregated dataset from all runs
+5. **RZSM fine-tuning (Phase 1)** — loads pre-trained detector, re-trains adversarial agent
+6. **RZSM fine-tuning (Phase 2)** — extended training with frozen detector for best results
+
 ```bash
-python -m src.train --env Ant-v5 --mode nominal --epochs 100
+# Default: runs Ant-v5 with sensible defaults
+source .env/bin/activate
+python scripts/run_pipeline.py
+
+# Select a different environment
+python scripts/run_pipeline.py --env HalfCheetah-v5
+
+# Multiple environments (runs each in sequence)
+python scripts/run_pipeline.py --env Ant-v5 HalfCheetah-v5 Humanoid-v5
+
+# Skip specific stages (useful for resuming)
+python scripts/run_pipeline.py --env Ant-v5 --skip-baselines --skip-nominal
+
+# Full options
+python scripts/run_pipeline.py --help
 ```
 
-**Phase 2** -- Train robust policy + adversary in zero-sum game:
+### Pipeline Stages
+
+| Stage | Flag to skip | Output |
+|-------|-------------|--------|
+| SA-MDP baseline | `--skip-baselines` | `logs/{env}/samdp/` |
+| Domain Randomisation baseline | `--skip-baselines` | `logs/{env}/domain_rand/` |
+| Nominal TD3 (pi_opt) | `--skip-nominal` | `logs/{env}/nominal/seed_0/` |
+| Adversarial TD3 (pi_rob + pi_adv) | `--skip-adversarial` | `logs/{env}/adversarial/seed_0/` |
+| Offline transformer training | `--skip-transformer` | `logs/{env}/detector_offline.pt` |
+| RZSM Phase 1 (with pre-trained detector) | `--skip-finetune` | `logs/{env}/rzsm_phase1/` |
+| RZSM Phase 2 (extended fine-tuning) | `--skip-finetune` | `logs/{env}/rzsm_phase2/` |
+
+---
+
+## Manual Training
+
+### Phase 1 — Nominal policy (pi_opt)
+
 ```bash
+python -m src.train --env Ant-v5 --mode nominal --epochs 200 --seed 0
+```
+
+### Phase 2 — Adversarial zero-sum game (pi_rob + pi_adv)
+
+```bash
+python -m src.train --env Ant-v5 --mode adversarial --epochs 200 \
+    --pi-opt-path logs/Ant_v5/nominal/seed_0/checkpoints \
+    --warmup-fraction 0.2
+```
+
+### Phase 3 — Offline transformer training
+
+```bash
+python scripts/train_transformer.py \
+    --log-dirs \
+        logs/Ant_v5/nominal/seed_0/dataset \
+        logs/Ant_v5/adversarial/seed_0/dataset \
+    --obs-dim 27 \
+    --output logs/Ant_v5/detector_offline.pt \
+    --epochs 50 --batch-size 512
+```
+
+### Phase 4 — RZSM fine-tuning with pre-trained detector
+
+```bash
+# Phase 1 fine-tune: learn blending with frozen detector
 python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
-    --pi-opt-path logs/nominal/checkpoints
+    --pi-opt-path logs/Ant_v5/nominal/seed_0/checkpoints \
+    --log-dir logs/Ant_v5/rzsm_phase1/seed_0
+
+# Phase 2 fine-tune: extended training for best results
+python -m src.train --env Ant-v5 --mode adversarial --epochs 200 \
+    --pi-opt-path logs/Ant_v5/nominal/seed_0/checkpoints \
+    --log-dir logs/Ant_v5/rzsm_phase2/seed_0 \
+    --disturbance-ratio 0.05 --warmup-fraction 0.1
 ```
 
 ### Key Arguments
@@ -73,13 +161,64 @@ python -m src.train --env Ant-v5 --mode adversarial --epochs 100 \
 |------|---------|-------------|
 | `--env` | `Ant-v5` | Gymnasium environment ID |
 | `--mode` | `nominal` | `nominal` or `adversarial` |
-| `--epochs` | `100` | Number of training epochs |
+| `--epochs` | `200` | Training epochs |
 | `--steps-per-epoch` | `4000` | Environment steps per epoch |
-| `--batch-size` | `1024` | Replay buffer sample size |
-| `--disturbance-ratio` | `0.1` | Adversary action scale (adversarial mode) |
-| `--disturbance-prob` | `0.5` | Probability of applying disturbance |
-| `--no-transformer` | `false` | Disable transformer detector |
+| `--batch-size` | `256` | Replay buffer sample size |
+| `--num-envs` | `1` | Parallel environments (vectorised) |
+| `--disturbance-ratio` | `0.05` | Max adversary action scale |
+| `--disturbance-prob` | `0.3` | Probability of disturbance per episode |
+| `--warmup-fraction` | `0.2` | Fraction of steps for epsilon annealing (0→ε_max) |
+| `--pi-opt-path` | `None` | Path to pre-trained nominal policy checkpoints |
+| `--no-transformer` | off | Disable transformer detector |
 | `--device` | `auto` | `cpu`, `cuda`, or `auto` |
+
+---
+
+## Architecture
+
+### Training Flow
+
+```
+TD3Agent (nominal)          →  pi_opt
+AdversarialTD3Agent         →  pi_rob + pi_adv  (zero-sum, gradient flip)
+TransformerDisturbanceDetector  →  p_t, δ̂_t, α_t
+AdaptiveControllerBlender   →  a_t = α_t · a_opt + (1 − α_t) · a_rob
+```
+
+### Gating Network (Paper Eq 15)
+
+```
+obs_history  →  TransformerEncoder  →  final token embedding
+                   ├── disturbance_head  →  p_t  ∈ [0,1]
+                   ├── magnitude_head    →  δ̂_t  (L2 norm estimate)
+                   └── blending_head([p_t, δ̂_t])  →  α_t  ∈ [0,1]
+```
+
+The gating head `f_φ` receives `[p_t, δ̂_t]` as its input (not the raw embedding), matching the paper exactly.
+
+### Adversarial Curriculum
+
+Disturbance budget is linearly annealed: ε(t) = ε_max · min(1, t / t_warmup), where t_warmup = 20% of total training steps by default.
+
+### Dataset Logging
+
+Every transition from every environment and every training mode is saved to `logs/{env}/{mode}/seed_0/dataset/episodes/ep_XXXXXX.npz`. This dataset is aggregated by `scripts/train_transformer.py` for large-scale offline training of the detector.
+
+---
+
+## Evaluation
+
+```bash
+python -m src.eval \
+    --env Ant-v5 \
+    --methods vanilla,rarl,rzsm \
+    --scenarios nominal,force,params,noise,combined \
+    --checkpoint-dir logs/ \
+    --episodes 50 \
+    --output results/
+```
+
+---
 
 ## C++ Build
 
@@ -101,69 +240,54 @@ cmake .. \
     -DMUJOCO_DIR="/opt/homebrew/opt/mujoco"
 cmake --build . --parallel
 
-# Run tests
+# Run C++ tests
 ctest --output-on-failure
-```
 
-### C++ Training
-
-```bash
+# C++ training
 ./train --env Ant --mode nominal --epochs 100 --device auto
 ./train --env Ant --mode adversarial --epochs 100 \
     --pi-opt-path logs/nominal_Ant/checkpoints
-./train --help   # all options
 ```
+
+---
 
 ## ROS 2 Deployment (Jetson)
 
-The `ros2_ws/` package deploys trained models on NVIDIA Jetson at 200-500 Hz.
-
-### Build
-
 ```bash
-# 1. Build the C++ library first
+# 1. Build C++ library first
 cd cpp && mkdir -p build && cd build
 cmake .. -DCMAKE_PREFIX_PATH="/path/to/libtorch" -DMUJOCO_DIR="/path/to/mujoco"
-cmake --build . --parallel
-cd ../..
+cmake --build . --parallel && cd ../..
 
-# 2. Build the ROS 2 workspace
-source /opt/ros/jazzy/setup.bash   # or humble
+# 2. Build ROS 2 workspace
+source /opt/ros/jazzy/setup.bash
 cd ros2_ws
 colcon build --cmake-args \
     -DCMAKE_PREFIX_PATH="/path/to/libtorch" \
     -DRZSM_LIB_DIR=$(realpath ../cpp/build)
 source install/setup.bash
-```
 
-### Run
-
-```bash
-# Launch with default parameters (Ant, 200 Hz)
+# 3. Launch
 ros2 launch rzsm_control robust_controller.launch.py
 
-# Custom parameters
-ros2 launch rzsm_control robust_controller.launch.py \
-    params_file:=/path/to/custom_params.yaml
-
 # Monitor
-ros2 topic echo /detector_status    # disturbance prob, alpha, latency
-ros2 topic hz /cmd_vel              # verify control frequency
+ros2 topic echo /detector_status
+ros2 topic hz /cmd_vel
 ```
 
-### Topics
+### ROS 2 Topics
 
 | Topic | Type | Direction | Description |
 |-------|------|-----------|-------------|
-| `/joint_states` | `sensor_msgs/JointState` | Subscribe | Robot joint positions/velocities |
-| `/imu` | `sensor_msgs/Imu` | Subscribe | IMU sensor data |
-| `/cmd_vel` | `geometry_msgs/TwistStamped` | Publish | Blended control command |
-| `/detector_status` | `rzsm_control/DetectorStatus` | Publish | Disturbance prob, alpha, latency |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Publish | Health and timing diagnostics |
+| `/joint_states` | `sensor_msgs/JointState` | Sub | Joint positions/velocities |
+| `/imu` | `sensor_msgs/Imu` | Sub | IMU sensor data |
+| `/cmd_vel` | `geometry_msgs/TwistStamped` | Pub | Blended control command |
+| `/detector_status` | `rzsm_control/DetectorStatus` | Pub | p_t, α_t, latency |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Pub | Health/timing |
+
+---
 
 ## ONNX Export
-
-Export trained models for TensorRT optimization on Jetson:
 
 ```bash
 python3 ros2_ws/src/rzsm_control/scripts/export_onnx.py \
@@ -173,18 +297,11 @@ python3 ros2_ws/src/rzsm_control/scripts/export_onnx.py \
     --obs-dim 27 --act-dim 8 \
     --output-dir models/onnx/
 
-# Then on Jetson:
+# TensorRT on Jetson
 trtexec --onnx=models/onnx/pi_opt.onnx --saveEngine=pi_opt.engine --fp16
 ```
 
-## Architecture
-
-- **Dual-policy**: `pi_opt` (nominal) + `pi_rob` (adversarial) with learned gating
-- **Adversarial training**: Controller maximizes Q, adversary minimizes Q (gradient flip)
-- **Transformer detector**: Lightweight encoder over observation history outputs disturbance probability and blending weight
-- **Policy mixing**: `a_t = alpha * a_opt + (1 - alpha) * a_rob`
-- **C++ port**: Namespace `rzsm`, LibTorch modules, MuJoCo C API (Ant + Humanoid)
-- **ROS 2 node**: 200 Hz timer callback, mutex-protected sensor fusion, pre-allocated GPU tensors
+---
 
 ## Tests
 
@@ -192,9 +309,11 @@ trtexec --onnx=models/onnx/pi_opt.onnx --saveEngine=pi_opt.engine --fp16
 # Python (73 tests)
 python -m pytest tests/ -v
 
-# C++ (64 tests, requires build)
+# C++ (64 tests)
 cd cpp/build && ctest --output-on-failure
 ```
+
+---
 
 ## License
 

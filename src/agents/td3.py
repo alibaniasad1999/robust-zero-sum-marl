@@ -172,6 +172,9 @@ class TD3Agent:
         # Performance logger (GPU vs CPU speed tracking)
         self.perf = PerformanceLogger(self.device, log_dir)
 
+        # Dataset logger — records every transition for offline transformer training
+        self.dataset_logger = DatasetLogger(os.path.join(log_dir, "dataset"))
+
         print(f"[TD3Agent] device={self.device}  num_envs={num_envs}  "
               f"pi_params={count_vars(self.pi)}  "
               f"q1_params={count_vars(self.q1)}  "
@@ -290,6 +293,11 @@ class TD3Agent:
         obs, _ = self.envs.reset()  # (N, obs_dim)
         ep_rets = np.zeros(N)
         ep_lens = np.zeros(N, dtype=int)
+        episode_ids = np.arange(N, dtype=int)
+        next_episode_id = N
+        _zero_act = np.zeros(self.envs.single_action_space.shape[0],
+                             dtype=np.float32)
+        _zero_params = np.zeros(1, dtype=np.float32)
         t0 = time.time()
 
         # Epoch-level metric accumulators
@@ -330,18 +338,35 @@ class TD3Agent:
                 truncs.reshape(-1, 1),
             )
 
-            # Per-env episode tracking
+            # Per-env episode tracking + dataset logging
             ep_rets += rews
             ep_lens += 1
             dones = terms | truncs
             for i in range(N):
+                self.dataset_logger.log(TransitionRecord(
+                    t=int(ep_lens[i]) - 1,
+                    episode_id=int(episode_ids[i]),
+                    obs=obs[i].copy(),
+                    action_ctrl=acts[i].copy(),
+                    action_dist=_zero_act.copy(),
+                    action_total=acts[i].copy(),
+                    reward=float(rews[i]),
+                    terminated=bool(terms[i]),
+                    truncated=bool(truncs[i]),
+                    disturbance_params=_zero_params.copy(),
+                    disturbance_tag="none",
+                    robust_weight_target=1.0,
+                ))
                 if dones[i]:
                     with open(self._csv_path, "a", newline="") as f:
                         csv.writer(f).writerow([global_step, ep_rets[i]])
                     epoch_returns.append(ep_rets[i])
                     epoch_lengths.append(ep_lens[i])
+                    self.dataset_logger.end_episode()
                     ep_rets[i] = 0.0
                     ep_lens[i] = 0
+                    episode_ids[i] = next_episode_id
+                    next_episode_id += 1
 
             obs = next_obs  # auto-reset already applied by VectorEnv
 
@@ -494,6 +519,7 @@ class AdversarialTD3Agent:
         # adversary
         disturbance_ratio: float = 0.05,
         disturbance_probability: float = 0.3,
+        warmup_fraction: float = 0.2,
         # transformer detector
         use_transformer: bool = True,
         transformer_seq_len: int = 20,
@@ -609,6 +635,7 @@ class AdversarialTD3Agent:
         self.save_freq = save_freq
         self.disturbance_ratio = disturbance_ratio
         self.disturbance_probability = disturbance_probability
+        self.warmup_fraction = warmup_fraction
 
         # TD3-specific
         self.policy_delay = policy_delay
@@ -783,7 +810,8 @@ class AdversarialTD3Agent:
 
     # ------------------------------------------------------------------
     def _collect_detector_data(
-        self, obs_seq: np.ndarray, has_dist: bool, ep_return: float
+        self, obs_seq: np.ndarray, has_dist: bool, ep_return: float,
+        mean_dist_magnitude: float = 0.0,
     ) -> None:
         # Alpha target: 1.0 = use optimal policy, 0.0 = use robust policy
         # Under disturbance: use robust (low alpha); nominal: use optimal (high alpha)
@@ -791,10 +819,12 @@ class AdversarialTD3Agent:
             alpha_target = 0.1  # strongly prefer robust policy
         else:
             alpha_target = 0.9  # strongly prefer optimal policy
-        self._transformer_data.append(
-            {"obs_seq": obs_seq, "dist": float(
-                has_dist), "alpha": alpha_target}
-        )
+        self._transformer_data.append({
+            "obs_seq": obs_seq,
+            "dist": float(has_dist),
+            "alpha": alpha_target,
+            "magnitude": mean_dist_magnitude,
+        })
         if len(self._transformer_data) > 50_000:
             self._transformer_data.pop(0)
 
@@ -810,7 +840,9 @@ class AdversarialTD3Agent:
                             dtype=torch.float32, device=self.device)
         alpha = torch.tensor([x["alpha"] for x in items],
                              dtype=torch.float32, device=self.device)
-        return self.det_trainer.train_step(obs, dist, alpha)
+        magnitude = torch.tensor([x["magnitude"] for x in items],
+                                 dtype=torch.float32, device=self.device)
+        return self.det_trainer.train_step(obs, dist, alpha, magnitude)
 
     # ------------------------------------------------------------------
     def train(self, epochs: Optional[int] = None) -> None:
@@ -837,6 +869,9 @@ class AdversarialTD3Agent:
 
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
+        # Epsilon annealing: ramp disturbance budget from 0 -> disturbance_ratio
+        # over the first warmup_fraction of total transitions (paper: first 20%)
+        warmup_steps = int(self.warmup_fraction * total_transitions)
 
         obs, _ = self.envs.reset()  # (N, obs_dim)
         ep_rets = np.zeros(N)
@@ -847,6 +882,8 @@ class AdversarialTD3Agent:
 
         # Per-env obs history for transformer data collection
         ep_obs_histories: list[list[np.ndarray]] = [[] for _ in range(N)]
+        # Per-env disturbance magnitude accumulator (for magnitude supervision)
+        ep_dist_magnitudes: list[list[float]] = [[] for _ in range(N)]
         episode_ids = np.arange(N, dtype=int)
         next_episode_id = N
 
@@ -866,6 +903,10 @@ class AdversarialTD3Agent:
         for t in range(total_steps):
             global_step = t * N
 
+            # Adversarial curriculum: linearly anneal disturbance budget
+            anneal_frac = min(1.0, global_step / max(1, warmup_steps))
+            self.dist_limit = self.act_limit * self.disturbance_ratio * anneal_frac
+
             # Store obs in per-env histories
             for i in range(N):
                 ep_obs_histories[i].append(obs[i].copy())
@@ -878,7 +919,7 @@ class AdversarialTD3Agent:
                 for i in range(N):
                     if has_dist[i]:
                         acts_dist[i] = (self.envs.single_action_space.sample()
-                                        * self.disturbance_ratio)
+                                        * self.disturbance_ratio * anneal_frac)
             else:
                 acts_ctrl = self._get_ctrl_action(obs, self.act_noise)
                 acts_adv = self._get_adv_action(obs, self.act_noise)
@@ -908,12 +949,28 @@ class AdversarialTD3Agent:
                 truncs.reshape(-1, 1),
             )
 
-            # Per-env episode tracking
+            # Per-env episode tracking + dataset logging
             ep_rets += rews
             ep_lens += 1
             dones = terms | truncs
 
             for i in range(N):
+                dist_mag_i = float(np.linalg.norm(acts_dist[i]))
+                ep_dist_magnitudes[i].append(dist_mag_i)
+                self.dataset_logger.log(TransitionRecord(
+                    t=int(ep_lens[i]) - 1,
+                    episode_id=int(episode_ids[i]),
+                    obs=obs[i].copy(),
+                    action_ctrl=acts_ctrl[i].copy(),
+                    action_dist=acts_dist[i].copy(),
+                    action_total=acts_total[i].copy(),
+                    reward=float(rews[i]),
+                    terminated=bool(terms[i]),
+                    truncated=bool(truncs[i]),
+                    disturbance_params=np.array([dist_mag_i], dtype=np.float32),
+                    disturbance_tag="adversarial" if has_dist[i] else "none",
+                    robust_weight_target=0.1 if has_dist[i] else 0.9,
+                ))
                 if dones[i]:
                     with open(self._csv_path, "a", newline="") as f:
                         csv.writer(f).writerow([global_step, ep_rets[i],
@@ -930,13 +987,17 @@ class AdversarialTD3Agent:
                         if len(ep_obs_histories[i]) >= seq_len:
                             obs_seq = np.array(
                                 ep_obs_histories[i][-seq_len:], dtype=np.float32)
+                            mean_mag = float(np.mean(ep_dist_magnitudes[i])) \
+                                if ep_dist_magnitudes[i] else 0.0
                             self._collect_detector_data(
-                                obs_seq, bool(has_dist[i]), ep_rets[i])
+                                obs_seq, bool(has_dist[i]), ep_rets[i],
+                                mean_dist_magnitude=mean_mag)
 
                     # Reset per-env state
                     ep_rets[i] = 0.0
                     ep_lens[i] = 0
                     ep_obs_histories[i] = []
+                    ep_dist_magnitudes[i] = []
                     has_dist[i] = np.random.rand(
                     ) < self.disturbance_probability
                     episode_ids[i] = next_episode_id

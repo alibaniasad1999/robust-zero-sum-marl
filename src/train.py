@@ -51,6 +51,8 @@ def main() -> None:
     # adversarial-specific
     p.add_argument("--disturbance-ratio", type=float, default=0.05)
     p.add_argument("--disturbance-prob", type=float, default=0.3)
+    p.add_argument("--warmup-fraction", type=float, default=0.2,
+                    help="Fraction of training steps to linearly anneal disturbance budget (default: 0.2)")
     p.add_argument("--pi-opt-path", type=str, default=None,
                     help="Path to pre-trained optimal policy checkpoints (for blending)")
     p.add_argument("--no-transformer", action="store_true",
@@ -102,6 +104,7 @@ def main() -> None:
             log_dir=log_dir,
             disturbance_ratio=args.disturbance_ratio,
             disturbance_probability=args.disturbance_prob,
+            warmup_fraction=args.warmup_fraction,
             use_transformer=not args.no_transformer,
             pi_opt_path=args.pi_opt_path,
             transformer_seq_len=args.seq_len,
