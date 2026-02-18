@@ -1,28 +1,59 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  run_ant.sh — Full Ant-v5 pipeline: train → tune → RZSM best → evaluate
+#  run_ant.sh — Full pipeline: train → tune → RZSM best → evaluate
 #
-#  One command does everything:
+#  One command does everything (default: Ant-v5):
 #    bash run_ant.sh
 #
-#  Optional overrides (all have sensible defaults):
-#    ENV=HalfCheetah-v5 bash run_ant.sh
-#    TUNE_TRIALS=20     bash run_ant.sh
-#    SKIP_BASELINES=1   bash run_ant.sh    # skip SA-MDP / DR if already done
-#    SKIP_NOMINAL=1     bash run_ant.sh
-#    SKIP_ADVERSARIAL=1 bash run_ant.sh
-#    SKIP_TRANSFORMER=1 bash run_ant.sh
-#    SKIP_TUNE=1        bash run_ant.sh
-#    SKIP_RZSM=1        bash run_ant.sh
-#    SKIP_EVAL=1        bash run_ant.sh
+#  Select environment:
+#    bash run_ant.sh --env HalfCheetah-v5
+#    bash run_ant.sh --env Humanoid-v5
+#
+#  Other flags:
+#    --tune-trials 20
+#    --skip-baselines
+#    --skip-nominal
+#    --skip-adversarial
+#    --skip-transformer
+#    --skip-tune
+#    --skip-rzsm
+#    --skip-eval
+#    --device cpu
+#    --seed 1
 # =============================================================================
 set -euo pipefail
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-ENV="${ENV:-Ant-v5}"
-SEED="${SEED:-0}"
-DEVICE="${DEVICE:-auto}"
+# ── Parse arguments ───────────────────────────────────────────────────────────
+ENV="Ant-v5"
+SEED="0"
+DEVICE="auto"
+TUNE_TRIALS="40"
+SKIP_BASELINES="0"
+SKIP_NOMINAL="0"
+SKIP_ADVERSARIAL="0"
+SKIP_TRANSFORMER="0"
+SKIP_TUNE="0"
+SKIP_RZSM="0"
+SKIP_EVAL="0"
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)              ENV="$2";          shift 2 ;;
+        --seed)             SEED="$2";         shift 2 ;;
+        --device)           DEVICE="$2";       shift 2 ;;
+        --tune-trials)      TUNE_TRIALS="$2";  shift 2 ;;
+        --skip-baselines)   SKIP_BASELINES="1"; shift ;;
+        --skip-nominal)     SKIP_NOMINAL="1";   shift ;;
+        --skip-adversarial) SKIP_ADVERSARIAL="1"; shift ;;
+        --skip-transformer) SKIP_TRANSFORMER="1"; shift ;;
+        --skip-tune)        SKIP_TUNE="1";      shift ;;
+        --skip-rzsm)        SKIP_RZSM="1";      shift ;;
+        --skip-eval)        SKIP_EVAL="1";      shift ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+# ── Fixed configuration ────────────────────────────────────────────────────────
 # 1 million steps = 250 epochs × 4 000 steps/epoch
 STEPS_PER_EPOCH=4000
 NOMINAL_EPOCHS=250          # 1 000 000 nominal steps
@@ -30,18 +61,8 @@ BASELINE_EPOCHS=250         # same for SA-MDP / DR
 ADV_EPOCHS=250              # 1 000 000 adversarial steps
 TRANSFORMER_EPOCHS=50       # offline detector training
 TUNE_EPOCHS=30              # short epochs per Optuna trial
-TUNE_TRIALS="${TUNE_TRIALS:-40}"   # Optuna trials per phase
-FINETUNE_EPOCHS=200         # RZSM final training with best params
+FINETUNE_EPOCHS=250         # RZSM final training with best params (1 M steps)
 EVAL_EPISODES=50
-
-# Skip flags (set to 1 to skip a stage when resuming)
-SKIP_BASELINES="${SKIP_BASELINES:-0}"
-SKIP_NOMINAL="${SKIP_NOMINAL:-0}"
-SKIP_ADVERSARIAL="${SKIP_ADVERSARIAL:-0}"
-SKIP_TRANSFORMER="${SKIP_TRANSFORMER:-0}"
-SKIP_TUNE="${SKIP_TUNE:-0}"
-SKIP_RZSM="${SKIP_RZSM:-0}"
-SKIP_EVAL="${SKIP_EVAL:-0}"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
