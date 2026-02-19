@@ -19,7 +19,8 @@ Zero-sum robust deep reinforcement learning with transformer-based disturbance d
 │   ├── train.py                  #   Single-run training entry point
 │   └── eval.py                   #   Multi-scenario evaluation
 ├── scripts/
-│   ├── run_pipeline.py           #   *** Full end-to-end pipeline (see below) ***
+│   ├── run_pipeline.sh           #   *** Full end-to-end pipeline (see below) ***
+│   ├── tune_rzsm.py              #   Optuna hyperparameter tuning (two-phase)
 │   ├── train_transformer.py      #   Offline transformer training on logged data
 │   ├── plot_results.py           #   Result plotting
 │   └── analyze_rzsm.py           #   Analysis utilities
@@ -71,44 +72,42 @@ pip install -r requirements.txt
 
 ## Full Pipeline (Recommended)
 
-`scripts/run_pipeline.py` runs the **complete end-to-end training sequence** automatically:
+`scripts/run_pipeline.sh` runs the **complete end-to-end training sequence** automatically:
 
 1. **Baselines** — SA-MDP and Domain Randomisation (data collection + logging)
 2. **Nominal TD3** — trains `pi_opt`, logs every transition to `dataset/`
 3. **Adversarial TD3** — trains `pi_rob + pi_adv` with epsilon annealing, logs data
 4. **Offline Transformer** — trains detector on the aggregated dataset from all runs
-5. **RZSM fine-tuning (Phase 1)** — loads pre-trained detector, re-trains adversarial agent
-6. **RZSM fine-tuning (Phase 2)** — extended training with frozen detector for best results
+5. **Optuna Tuning** — two-phase Bayesian hyperparameter search for RZSM
+6. **RZSM Final** — trains RZSM with best hyperparameters (1M steps)
+7. **Evaluation** — all methods across 5 disturbance scenarios
 
 ```bash
 # Default: runs Ant-v5 with sensible defaults
-source .env/bin/activate
-python scripts/run_pipeline.py
+bash scripts/run_pipeline.sh
 
 # Select a different environment
-python scripts/run_pipeline.py --env HalfCheetah-v5
-
-# Multiple environments (runs each in sequence)
-python scripts/run_pipeline.py --env Ant-v5 HalfCheetah-v5 Humanoid-v5
+bash scripts/run_pipeline.sh --env HalfCheetah-v5
 
 # Skip specific stages (useful for resuming)
-python scripts/run_pipeline.py --env Ant-v5 --skip-baselines --skip-nominal
+bash scripts/run_pipeline.sh --env Ant-v5 --skip-baselines --skip-nominal
 
-# Full options
-python scripts/run_pipeline.py --help
+# All flags
+bash scripts/run_pipeline.sh --help
 ```
 
 ### Pipeline Stages
 
 | Stage | Flag to skip | Output |
 |-------|-------------|--------|
-| SA-MDP baseline | `--skip-baselines` | `logs/{env}/samdp/` |
+| SA-MDP baseline | `--skip-baselines` | `logs/{env}/sa_mdp/` |
 | Domain Randomisation baseline | `--skip-baselines` | `logs/{env}/domain_rand/` |
 | Nominal TD3 (pi_opt) | `--skip-nominal` | `logs/{env}/nominal/seed_0/` |
 | Adversarial TD3 (pi_rob + pi_adv) | `--skip-adversarial` | `logs/{env}/adversarial/seed_0/` |
 | Offline transformer training | `--skip-transformer` | `logs/{env}/detector_offline.pt` |
-| RZSM Phase 1 (with pre-trained detector) | `--skip-finetune` | `logs/{env}/rzsm_phase1/` |
-| RZSM Phase 2 (extended fine-tuning) | `--skip-finetune` | `logs/{env}/rzsm_phase2/` |
+| Optuna hyperparameter tuning | `--skip-tune` | `logs/{env}/tuning/optuna.db` |
+| RZSM final training (best params) | `--skip-rzsm` | `logs/{env}/rzsm_best/` |
+| Evaluation (all methods) | `--skip-eval` | `results/{env}/` |
 
 ---
 

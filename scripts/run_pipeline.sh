@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  run_ant.sh — Full pipeline: train → tune → RZSM best → evaluate
+#  run_pipeline.sh — Full pipeline: train → tune → RZSM best → evaluate
 #
 #  One command does everything (default: Ant-v5):
-#    bash run_ant.sh
+#    bash scripts/run_pipeline.sh
 #
 #  Select environment:
-#    bash run_ant.sh --env HalfCheetah-v5
-#    bash run_ant.sh --env Humanoid-v5
+#    bash scripts/run_pipeline.sh --env HalfCheetah-v5
+#    bash scripts/run_pipeline.sh --env Humanoid-v5
 #
 #  Other flags:
 #    --tune-trials 20
@@ -18,6 +18,7 @@
 #    --skip-tune
 #    --skip-rzsm
 #    --skip-eval
+#    --num-envs 50
 #    --device cpu
 #    --seed 1
 # =============================================================================
@@ -27,6 +28,7 @@ set -euo pipefail
 ENV="Ant-v5"
 SEED="0"
 DEVICE="auto"
+NUM_ENVS="100"
 TUNE_TRIALS="40"
 SKIP_BASELINES="0"
 SKIP_NOMINAL="0"
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --env)              ENV="$2";          shift 2 ;;
         --seed)             SEED="$2";         shift 2 ;;
         --device)           DEVICE="$2";       shift 2 ;;
+        --num-envs)         NUM_ENVS="$2";     shift 2 ;;
         --tune-trials)      TUNE_TRIALS="$2";  shift 2 ;;
         --skip-baselines)   SKIP_BASELINES="1"; shift ;;
         --skip-nominal)     SKIP_NOMINAL="1";   shift ;;
@@ -65,7 +68,8 @@ FINETUNE_EPOCHS=250         # RZSM final training with best params (1 M steps)
 EVAL_EPISODES=50
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$REPO_DIR/.env/bin/activate"
 ENV_SAFE="${ENV//-/_}"
 LOGS="$REPO_DIR/logs/$ENV_SAFE"
@@ -87,8 +91,9 @@ stage() { echo -e "\n${BOLD}${CYAN}═══════════════
 done_()  { echo -e "${GREEN}  ✓ $1${RESET}"; }
 skip_()  { echo -e "  ↷ Skipping: $1"; }
 
-# Activate venv
+# Activate venv and cd to repo root (python -m src.* needs it)
 source "$VENV"
+cd "$REPO_DIR"
 PY="$(which python)"
 
 START_TIME=$(date +%s)
@@ -98,7 +103,7 @@ echo -e "${BOLD}╔════════════════════�
 echo -e "${BOLD}║  RZSM Full Pipeline — $ENV${RESET}"
 echo -e "${BOLD}║  1 000 000 steps → tune → RZSM best → eval${RESET}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════╝${RESET}"
-echo "  env=$ENV  seed=$SEED  device=$DEVICE"
+echo "  env=$ENV  seed=$SEED  device=$DEVICE  num_envs=$NUM_ENVS"
 echo "  nominal_epochs=$NOMINAL_EPOCHS (${STEPS_PER_EPOCH}×${NOMINAL_EPOCHS} = $(( NOMINAL_EPOCHS * STEPS_PER_EPOCH )) steps)"
 echo "  tune_trials=$TUNE_TRIALS × $TUNE_EPOCHS epochs/trial"
 echo ""
@@ -116,6 +121,7 @@ else
         --env "$ENV" \
         --epochs $BASELINE_EPOCHS \
         --steps-per-epoch $STEPS_PER_EPOCH \
+        --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
         --log-dir "$LOGS/sa_mdp/seed_$SEED"
@@ -125,6 +131,7 @@ else
         --env "$ENV" \
         --epochs $BASELINE_EPOCHS \
         --steps-per-epoch $STEPS_PER_EPOCH \
+        --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
         --log-dir "$LOGS/domain_rand/seed_$SEED"
@@ -143,6 +150,7 @@ else
         --mode nominal \
         --epochs $NOMINAL_EPOCHS \
         --steps-per-epoch $STEPS_PER_EPOCH \
+        --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
         --log-dir "$LOGS/nominal/seed_$SEED"
@@ -161,6 +169,7 @@ else
         --mode adversarial \
         --epochs $ADV_EPOCHS \
         --steps-per-epoch $STEPS_PER_EPOCH \
+        --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
         --log-dir "$LOGS/adversarial/seed_$SEED" \
@@ -193,7 +202,7 @@ else
         OBS_DIM=$($PY -c "import gymnasium as gym; e=gym.make('$ENV'); print(e.observation_space.shape[0]); e.close()")
         echo "  obs_dim=$OBS_DIM"
 
-        $PY scripts/train_transformer.py \
+        $PY "$REPO_DIR/scripts/train_transformer.py" \
             --log-dirs "${DATASET_DIRS[@]}" \
             --obs-dim "$OBS_DIM" \
             --output "$DETECTOR_PT" \
@@ -211,7 +220,7 @@ stage "5/8  Optuna Hyperparameter Tuning  ($TUNE_TRIALS trials × 2 phases)"
 if [[ "$SKIP_TUNE" == "1" ]]; then
     skip_ "hyperparameter tuning"
 else
-    $PY scripts/tune_rzsm.py \
+    $PY "$REPO_DIR/scripts/tune_rzsm.py" \
         --env "$ENV" \
         --phase both \
         --trials $TUNE_TRIALS \
@@ -318,6 +327,7 @@ else
         --mode adversarial \
         --epochs $FINETUNE_EPOCHS \
         --steps-per-epoch $STEPS_PER_EPOCH \
+        --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
         --log-dir "$LOGS/rzsm_best/seed_$SEED" \
