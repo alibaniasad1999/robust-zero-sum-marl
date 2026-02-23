@@ -30,8 +30,15 @@ Thumbs.db
 htmlcov/
 .coverage
 
-# Training outputs
-# logs/
+# Training outputs – keep logs/ out of git
+logs/
+*.npz
+*.pt
+*.pth
+
+# But keep pretrained examples
+!pretrained/
+!pretrained/**
 
 # LaTeX build artifacts
 report/*.aux
