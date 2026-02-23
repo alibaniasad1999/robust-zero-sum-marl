@@ -72,8 +72,10 @@ def main() -> None:
 
     env_fn = make_env(args.env)
     env_safe = args.env.replace("-", "_")
-    base_log_dir = args.log_dir or f"logs/{env_safe}/{args.mode}"
-    log_dir = os.path.join(base_log_dir, f"seed_{args.seed}")
+    if args.log_dir:
+        log_dir = args.log_dir
+    else:
+        log_dir = os.path.join(f"logs/{env_safe}/{args.mode}", f"seed_{args.seed}")
 
     if args.mode == "nominal":
         agent = TD3Agent(

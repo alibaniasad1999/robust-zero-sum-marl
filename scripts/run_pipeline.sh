@@ -114,8 +114,8 @@ mkdir -p "$LOGS" "$RESULTS"
 # STAGE 1 — Baselines: SA-MDP + Domain Randomisation
 # ─────────────────────────────────────────────────────────────────────────────
 stage "1/8  Baselines (SA-MDP + Domain Randomisation)"
-if [[ "$SKIP_BASELINES" == "1" ]]; then
-    skip_ "baselines"
+if [[ "$SKIP_BASELINES" == "1" ]] || [[ -d "$LOGS/sa_mdp/seed_$SEED/checkpoints" && -d "$LOGS/domain_rand/seed_$SEED/checkpoints" ]]; then
+    skip_ "baselines (already trained)"
 else
     $PY -m src.baselines.sa_mdp \
         --env "$ENV" \
@@ -142,8 +142,8 @@ fi
 # STAGE 2 — Nominal TD3 (pi_opt)   — 1 M steps
 # ─────────────────────────────────────────────────────────────────────────────
 stage "2/8  Nominal TD3 — pi_opt  (1 000 000 steps)"
-if [[ "$SKIP_NOMINAL" == "1" ]]; then
-    skip_ "nominal TD3"
+if [[ "$SKIP_NOMINAL" == "1" ]] || [[ -d "$NOMINAL_CKPT" ]]; then
+    skip_ "nominal TD3 (already trained)"
 else
     $PY -m src.train \
         --env "$ENV" \
@@ -161,8 +161,8 @@ fi
 # STAGE 3 — Adversarial TD3 (pi_rob + pi_adv)   — 1 M steps
 # ─────────────────────────────────────────────────────────────────────────────
 stage "3/8  Adversarial TD3 — pi_rob + pi_adv  (1 000 000 steps)"
-if [[ "$SKIP_ADVERSARIAL" == "1" ]]; then
-    skip_ "adversarial TD3"
+if [[ "$SKIP_ADVERSARIAL" == "1" ]] || [[ -d "$ADV_CKPT" ]]; then
+    skip_ "adversarial TD3 (already trained)"
 else
     $PY -m src.train \
         --env "$ENV" \
@@ -184,8 +184,8 @@ fi
 # STAGE 4 — Offline Transformer training on ALL logged data
 # ─────────────────────────────────────────────────────────────────────────────
 stage "4/8  Offline Transformer — aggregate all dataset dirs"
-if [[ "$SKIP_TRANSFORMER" == "1" ]]; then
-    skip_ "offline transformer"
+if [[ "$SKIP_TRANSFORMER" == "1" ]] || [[ -f "$DETECTOR_PT" ]]; then
+    skip_ "offline transformer (already trained)"
 else
     # Collect every dataset/ directory that was populated
     DATASET_DIRS=()
@@ -217,8 +217,8 @@ fi
 # STAGE 5 — Hyperparameter Tuning  (Phase A: core  |  Phase B: transformer)
 # ─────────────────────────────────────────────────────────────────────────────
 stage "5/8  Optuna Hyperparameter Tuning  ($TUNE_TRIALS trials × 2 phases)"
-if [[ "$SKIP_TUNE" == "1" ]]; then
-    skip_ "hyperparameter tuning"
+if [[ "$SKIP_TUNE" == "1" ]] || [[ -f "$BEST_PARAMS_FILE" ]]; then
+    skip_ "hyperparameter tuning (already done)"
 else
     $PY "$REPO_DIR/scripts/tune_rzsm.py" \
         --env "$ENV" \
@@ -319,8 +319,8 @@ done_ "Best params loaded"
 # STAGE 7 — RZSM final training with best hyperparameters  (1 M steps)
 # ─────────────────────────────────────────────────────────────────────────────
 stage "7/8  RZSM Final Training with best params  (1 000 000 steps)"
-if [[ "$SKIP_RZSM" == "1" ]]; then
-    skip_ "RZSM final training"
+if [[ "$SKIP_RZSM" == "1" ]] || [[ -d "$RZSM_CKPT" ]]; then
+    skip_ "RZSM final training (already trained)"
 else
     $PY -m src.train \
         --env "$ENV" \
