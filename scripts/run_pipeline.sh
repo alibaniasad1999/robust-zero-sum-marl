@@ -91,6 +91,31 @@ stage() { echo -e "\n${BOLD}${CYAN}═══════════════
 done_()  { echo -e "${GREEN}  ✓ $1${RESET}"; }
 skip_()  { echo -e "  ↷ Skipping: $1"; }
 
+# Check if training completed (reads epoch from training_state.pt)
+# Usage: training_done <ckpt_dir> <required_epochs>
+# Returns 0 if done, 1 if not done (sets RESUME_EPOCH)
+RESUME_EPOCH=0
+training_done() {
+    local ckpt_dir="$1"
+    local required="$2"
+    RESUME_EPOCH=0
+    if [[ ! -f "$ckpt_dir/training_state.pt" ]]; then
+        return 1  # no checkpoint at all
+    fi
+    RESUME_EPOCH=$($PY -c "
+import torch, sys
+try:
+    s = torch.load('$ckpt_dir/training_state.pt', map_location='cpu', weights_only=False)
+    print(s.get('epoch', 0))
+except:
+    print(0)
+" 2>/dev/null)
+    if [[ "$RESUME_EPOCH" -ge "$required" ]]; then
+        return 0  # done
+    fi
+    return 1  # partial — needs resume
+}
+
 # Activate venv and cd to repo root (python -m src.* needs it)
 source "$VENV"
 cd "$REPO_DIR"
@@ -142,9 +167,16 @@ fi
 # STAGE 2 — Nominal TD3 (pi_opt)   — 1 M steps
 # ─────────────────────────────────────────────────────────────────────────────
 stage "2/8  Nominal TD3 — pi_opt  (1 000 000 steps)"
-if [[ "$SKIP_NOMINAL" == "1" ]] || [[ -d "$NOMINAL_CKPT" ]]; then
-    skip_ "nominal TD3 (already trained)"
+if [[ "$SKIP_NOMINAL" == "1" ]]; then
+    skip_ "nominal TD3"
+elif training_done "$NOMINAL_CKPT" "$NOMINAL_EPOCHS"; then
+    skip_ "nominal TD3 (complete: epoch $RESUME_EPOCH/$NOMINAL_EPOCHS)"
 else
+    RESUME_FLAG=""
+    if [[ "$RESUME_EPOCH" -gt 0 ]]; then
+        echo "  Resuming from epoch $RESUME_EPOCH/$NOMINAL_EPOCHS"
+        RESUME_FLAG="--resume"
+    fi
     $PY -m src.train \
         --env "$ENV" \
         --mode nominal \
@@ -153,7 +185,8 @@ else
         --num-envs $NUM_ENVS \
         --seed $SEED \
         --device "$DEVICE" \
-        --log-dir "$LOGS/nominal/seed_$SEED"
+        --log-dir "$LOGS/nominal/seed_$SEED" \
+        $RESUME_FLAG
     done_ "Nominal TD3 → $NOMINAL_CKPT"
 fi
 
@@ -161,9 +194,16 @@ fi
 # STAGE 3 — Adversarial TD3 (pi_rob + pi_adv)   — 1 M steps
 # ─────────────────────────────────────────────────────────────────────────────
 stage "3/8  Adversarial TD3 — pi_rob + pi_adv  (1 000 000 steps)"
-if [[ "$SKIP_ADVERSARIAL" == "1" ]] || [[ -d "$ADV_CKPT" ]]; then
-    skip_ "adversarial TD3 (already trained)"
+if [[ "$SKIP_ADVERSARIAL" == "1" ]]; then
+    skip_ "adversarial TD3"
+elif training_done "$ADV_CKPT" "$ADV_EPOCHS"; then
+    skip_ "adversarial TD3 (complete: epoch $RESUME_EPOCH/$ADV_EPOCHS)"
 else
+    RESUME_FLAG=""
+    if [[ "$RESUME_EPOCH" -gt 0 ]]; then
+        echo "  Resuming from epoch $RESUME_EPOCH/$ADV_EPOCHS"
+        RESUME_FLAG="--resume"
+    fi
     $PY -m src.train \
         --env "$ENV" \
         --mode adversarial \
@@ -176,7 +216,8 @@ else
         --pi-opt-path "$NOMINAL_CKPT" \
         --disturbance-ratio 0.05 \
         --disturbance-prob 0.3 \
-        --warmup-fraction 0.2
+        --warmup-fraction 0.2 \
+        $RESUME_FLAG
     done_ "Adversarial TD3 → $ADV_CKPT"
 fi
 
@@ -319,9 +360,16 @@ done_ "Best params loaded"
 # STAGE 7 — RZSM final training with best hyperparameters  (1 M steps)
 # ─────────────────────────────────────────────────────────────────────────────
 stage "7/8  RZSM Final Training with best params  (1 000 000 steps)"
-if [[ "$SKIP_RZSM" == "1" ]] || [[ -d "$RZSM_CKPT" ]]; then
-    skip_ "RZSM final training (already trained)"
+if [[ "$SKIP_RZSM" == "1" ]]; then
+    skip_ "RZSM final training"
+elif training_done "$RZSM_CKPT" "$FINETUNE_EPOCHS"; then
+    skip_ "RZSM final training (complete: epoch $RESUME_EPOCH/$FINETUNE_EPOCHS)"
 else
+    RESUME_FLAG=""
+    if [[ "$RESUME_EPOCH" -gt 0 ]]; then
+        echo "  Resuming from epoch $RESUME_EPOCH/$FINETUNE_EPOCHS"
+        RESUME_FLAG="--resume"
+    fi
     $PY -m src.train \
         --env "$ENV" \
         --mode adversarial \
@@ -342,14 +390,15 @@ else
         --nhead "$BEST_NHEAD" \
         --transformer-layers "$BEST_LAYERS" \
         --detector-lr "$BEST_DET_LR" \
-        --detector-train-interval "$BEST_TRAIN_INTERVAL"
+        --detector-train-interval "$BEST_TRAIN_INTERVAL" \
+        $RESUME_FLAG
     done_ "RZSM → $RZSM_CKPT"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE 8 — Evaluation: all methods, all scenarios
 # ─────────────────────────────────────────────────────────────────────────────
-stage "8/8  Evaluation  ($EVAL_EPISODES episodes × 5 scenarios)"
+stage "8/8  Evaluation  ($EVAL_EPISODES episodes × 4 intensity levels)"
 if [[ "$SKIP_EVAL" == "1" ]]; then
     skip_ "evaluation"
 else
@@ -365,7 +414,7 @@ else
     $PY -m src.eval \
         --env "$ENV" \
         --methods "vanilla,rarl,sa_mdp,dr,rzsm" \
-        --scenarios "nominal,force,params,noise,combined" \
+        --scenarios "nominal,low,medium,high" \
         --checkpoint-dirs "$CKPT_DIRS" \
         --episodes $EVAL_EPISODES \
         --output "$RESULTS" \

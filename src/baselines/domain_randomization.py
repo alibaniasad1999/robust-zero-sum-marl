@@ -100,6 +100,8 @@ def main() -> None:
     p.add_argument("--mass-range", type=float, default=0.3)
     p.add_argument("--friction-range", type=float, default=0.3)
     p.add_argument("--damping-range", type=float, default=0.3)
+    p.add_argument("--resume", action="store_true",
+                    help="Resume training from existing checkpoint")
     args = p.parse_args()
 
     mr, fr, dr_ = args.mass_range, args.friction_range, args.damping_range
@@ -126,8 +128,16 @@ def main() -> None:
         device=args.device,
         log_dir=log_dir,
     )
-    agent.train()
-    agent.save()
+
+    resume_epoch = 0
+    if args.resume:
+        import os
+        ckpt_dir = os.path.join(log_dir, "checkpoints")
+        if os.path.isdir(ckpt_dir):
+            resume_epoch = agent.load(ckpt_dir, resume=True)
+
+    agent.train(resume_epoch=resume_epoch)
+    agent.save(epoch=args.epochs, global_step=args.steps_per_epoch * args.epochs)
     print("Done.")
 
 

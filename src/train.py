@@ -67,6 +67,8 @@ def main() -> None:
     p.add_argument("--transformer-layers", type=int, default=3)
     p.add_argument("--detector-lr", type=float, default=1e-4)
     p.add_argument("--detector-train-interval", type=int, default=200)
+    p.add_argument("--resume", action="store_true",
+                    help="Resume training from existing checkpoint in log-dir")
     args = p.parse_args()
     args.hidden_sizes = tuple(int(x) for x in args.hidden_sizes.split(","))
 
@@ -117,8 +119,21 @@ def main() -> None:
             transformer_train_interval=args.detector_train_interval,
         )
 
-    agent.train()
-    agent.save()
+    # Resume from checkpoint if requested
+    resume_epoch = 0
+    if args.resume:
+        ckpt_dir = os.path.join(log_dir, "checkpoints")
+        if os.path.isdir(ckpt_dir):
+            resume_epoch = agent.load(ckpt_dir, resume=True)
+            if resume_epoch >= args.epochs:
+                print(f"Training already complete ({resume_epoch}/{args.epochs} epochs). "
+                      f"Nothing to do.")
+                return
+        else:
+            print(f"No checkpoint found at {ckpt_dir}, starting fresh.")
+
+    agent.train(resume_epoch=resume_epoch)
+    agent.save(epoch=args.epochs, global_step=args.steps_per_epoch * args.epochs)
     print("Done.")
 
 

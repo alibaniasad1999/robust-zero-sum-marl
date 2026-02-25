@@ -54,24 +54,28 @@ class SAMDPAgent(TD3Agent):
         noise = np.random.uniform(-self.eps, self.eps, size=obs.shape).astype(obs.dtype)
         return obs + noise
 
-    def train(self, epochs: Optional[int] = None) -> None:
+    def train(self, epochs: Optional[int] = None,
+              resume_epoch: int = 0) -> None:
         """SA-MDP training loop — same as TD3 but perturbs obs for action selection."""
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        # Overwrite CSV on each new training run
-        with open(self._csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(["step", "episode_return"])
+        if resume_epoch > 0:
+            print(f"  [resume] SA-MDP continuing from epoch {resume_epoch}/{epochs}")
+        else:
+            with open(self._csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(["step", "episode_return"])
 
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
+        start_step = (self.steps_per_epoch * resume_epoch) // N
 
         obs, _ = self.envs.reset()
         ep_rets = np.zeros(N)
         ep_lens = np.zeros(N, dtype=int)
         t0 = time.time()
 
-        for t in range(total_steps):
+        for t in range(start_step, total_steps):
             global_step = t * N
 
             if global_step < self.start_steps:
@@ -123,7 +127,7 @@ class SAMDPAgent(TD3Agent):
                     print(f"[SA-MDP] Epoch {epoch}/{epochs}  "
                           f"elapsed={time.time()-t0:.0f}s")
                     if epoch % self.save_freq == 0:
-                        self.save()
+                        self.save(epoch=epoch, global_step=global_step)
 
 
 def main() -> None:
@@ -140,6 +144,8 @@ def main() -> None:
     p.add_argument("--log-dir", type=str, default=None)
     p.add_argument("--eps", type=float, default=0.05,
                     help="SA-MDP perturbation radius (ℓ∞)")
+    p.add_argument("--resume", action="store_true",
+                    help="Resume training from existing checkpoint")
     args = p.parse_args()
 
     env_fn = lambda: gym.make(args.env)
@@ -159,8 +165,15 @@ def main() -> None:
         device=args.device,
         log_dir=log_dir,
     )
-    agent.train()
-    agent.save()
+
+    resume_epoch = 0
+    if args.resume:
+        ckpt_dir = os.path.join(log_dir, "checkpoints")
+        if os.path.isdir(ckpt_dir):
+            resume_epoch = agent.load(ckpt_dir, resume=True)
+
+    agent.train(resume_epoch=resume_epoch)
+    agent.save(epoch=args.epochs, global_step=args.steps_per_epoch * args.epochs)
     print("Done.")
 
 

@@ -113,17 +113,55 @@ _DEFAULT_PROFILE: Dict[str, Any] = {
 
 SCENARIO_NAMES = ["nominal", "force", "params", "noise", "combined"]
 
+# Disturbance intensity levels: name -> scale factor applied to all magnitudes
+INTENSITY_LEVELS = {
+    "nominal": 0.0,
+    "low": 0.25,
+    "medium": 0.5,
+    "high": 1.0,
+}
+INTENSITY_NAMES = list(INTENSITY_LEVELS.keys())
+
 
 def _get_profile(env_id: str) -> Dict[str, Any]:
     return _DISTURBANCE_PROFILES.get(env_id, _DEFAULT_PROFILE)
 
 
+def _scale_profile(profile: Dict[str, Any], scale: float) -> Dict[str, Any]:
+    """Scale disturbance magnitudes by a factor in [0, 1]."""
+    return {
+        "force_mag": profile["force_mag"] * scale,
+        "interval": profile["interval"],
+        "force_duration": profile.get("force_duration", 5),
+        "mass_range": profile["mass_range"] * scale,
+        "friction_range": profile["friction_range"] * scale,
+        "damping_range": profile["damping_range"] * scale,
+        "noise_std": profile["noise_std"] * scale,
+    }
+
+
 def make_scenario_env(env_id: str, scenario: str) -> gym.Env:
     """Create a Gymnasium env with the specified disturbance scenario."""
     env = gym.make(env_id)
+
+    # Support intensity levels (nominal/low/medium/high)
+    if scenario in INTENSITY_LEVELS:
+        scale = INTENSITY_LEVELS[scenario]
+        if scale == 0.0:
+            return env
+        p = _scale_profile(_get_profile(env_id), scale)
+        return CombinedDisturbanceWrapper(
+            env, force_mag=p["force_mag"],
+            mass_range=p["mass_range"],
+            friction_range=p["friction_range"],
+            damping_range=p["damping_range"],
+            noise_std=p["noise_std"],
+            force_duration=p["force_duration"],
+            interval_range=p["interval"])
+
     if scenario not in SCENARIO_NAMES:
         raise ValueError(f"Unknown scenario: {scenario}. "
-                         f"Choose from {SCENARIO_NAMES}")
+                         f"Choose from {SCENARIO_NAMES + INTENSITY_NAMES}")
 
     if scenario == "nominal":
         return env
@@ -578,7 +616,7 @@ def run_evaluation(args) -> None:
                 # Load policy for this seed
                 hidden = getattr(args, "hidden_sizes", (256, 256))
                 rzsm_state = None
-                if method in ("vanilla", "sa_mdp", "dr"):
+                if method in ("vanilla", "sa_mdp", "dr", "domain_rand"):
                     policy_fn = load_vanilla_policy(
                         ckpt_dir, args.env, device, hidden_sizes=hidden)
                 elif method == "rarl":
@@ -736,8 +774,10 @@ def main() -> None:
     p.add_argument("--methods", type=str, default="vanilla,rarl,sa_mdp,dr,rzsm",
                     help="Comma-separated list of methods")
     p.add_argument("--scenarios", type=str,
-                    default="nominal,force,params,noise,combined",
-                    help="Comma-separated disturbance scenarios")
+                    default="nominal,low,medium,high",
+                    help="Comma-separated disturbance scenarios. "
+                         "Intensity levels: nominal,low,medium,high. "
+                         "Per-type: force,params,noise,combined.")
     p.add_argument("--checkpoint-dir", type=str, default=None,
                     help="Root dir containing method subdirectories "
                          "(default: logs/<env_safe>/)")

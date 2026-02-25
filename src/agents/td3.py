@@ -268,27 +268,32 @@ class TD3Agent:
         return metrics
 
     # ------------------------------------------------------------------
-    def train(self, epochs: Optional[int] = None) -> None:
+    def train(self, epochs: Optional[int] = None,
+              resume_epoch: int = 0) -> None:
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        # Overwrite CSVs on each new training run
-        with open(self._csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(["step", "episode_return"])
-
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
-        with open(metrics_csv, "w", newline="") as f:
-            csv.writer(f).writerow([
-                "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
-                "q1_val", "q2_val",
-                "grad_q1", "grad_q2", "grad_pi",
-                "mean_return", "mean_length",
-                "episodes", "buffer_size", "elapsed_s",
-            ])
+        if resume_epoch > 0:
+            # Append mode: keep existing CSVs
+            print(f"  [resume] Continuing from epoch {resume_epoch}/{epochs}")
+        else:
+            # Fresh start: overwrite CSVs
+            with open(self._csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(["step", "episode_return"])
+            with open(metrics_csv, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
+                    "q1_val", "q2_val",
+                    "grad_q1", "grad_q2", "grad_pi",
+                    "mean_return", "mean_length",
+                    "episodes", "buffer_size", "elapsed_s",
+                ])
 
         # Each loop iteration collects N transitions
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
+        start_step = (self.steps_per_epoch * resume_epoch) // N
 
         obs, _ = self.envs.reset()  # (N, obs_dim)
         ep_rets = np.zeros(N)
@@ -309,7 +314,7 @@ class TD3Agent:
 
         self.perf.start_epoch()
 
-        for t in range(total_steps):
+        for t in range(start_step, total_steps):
             global_step = t * N
 
             # Action selection
@@ -450,18 +455,44 @@ class TD3Agent:
                     self.perf.start_epoch()
 
                     if epoch % self.save_freq == 0:
-                        self.save()
+                        self.save(epoch=epoch, global_step=global_step)
 
     # ------------------------------------------------------------------
-    def save(self, path: Optional[str] = None) -> None:
+    def save(self, path: Optional[str] = None, *, epoch: int = 0,
+             global_step: int = 0, save_buffer: bool = True) -> None:
         path = path or os.path.join(self.log_dir, "checkpoints")
         os.makedirs(path, exist_ok=True)
         torch.save(self.pi.state_dict(), os.path.join(path, "pi.pt"))
         torch.save(self.q1.state_dict(), os.path.join(path, "q1.pt"))
         torch.save(self.q2.state_dict(), os.path.join(path, "q2.pt"))
-        print(f"  [saved] {path}")
+        # Training state for resume
+        torch.save({
+            "epoch": epoch,
+            "global_step": global_step,
+            "update_count": self._update_count,
+            "pi_optim": self.pi_optim.state_dict(),
+            "q1_optim": self.q1_optim.state_dict(),
+            "q2_optim": self.q2_optim.state_dict(),
+        }, os.path.join(path, "training_state.pt"))
+        if save_buffer and self.buffer.size > 0:
+            n = self.buffer.size
+            np.savez_compressed(
+                os.path.join(path, "buffer.npz"),
+                obs=self.buffer.obs_buffer[:n],
+                next_obs=self.buffer.next_obs_buffer[:n],
+                act=self.buffer.act_buffer[:n],
+                rew=self.buffer.rew_buffer[:n],
+                terminated=self.buffer.terminated_buffer[:n],
+                truncated=self.buffer.truncated_buffer[:n],
+                ptr=self.buffer.ptr, size=self.buffer.size,
+            )
+        print(f"  [saved] {path}  (epoch={epoch})")
 
-    def load(self, path: str) -> None:
+    def load(self, path: str, *, resume: bool = False) -> int:
+        """Load checkpoint. If resume=True, also load optimizers and buffer.
+
+        Returns the epoch to resume from (0 if not resuming).
+        """
         self.pi.load_state_dict(torch.load(os.path.join(
             path, "pi.pt"), map_location=self.device))
         self.q1.load_state_dict(torch.load(os.path.join(
@@ -471,7 +502,35 @@ class TD3Agent:
         self.pi_targ = deepcopy(self.pi)
         self.q1_targ = deepcopy(self.q1)
         self.q2_targ = deepcopy(self.q2)
+
+        resume_epoch = 0
+        if resume:
+            ts_path = os.path.join(path, "training_state.pt")
+            if os.path.isfile(ts_path):
+                ts = torch.load(ts_path, map_location=self.device)
+                self.pi_optim.load_state_dict(ts["pi_optim"])
+                self.q1_optim.load_state_dict(ts["q1_optim"])
+                self.q2_optim.load_state_dict(ts["q2_optim"])
+                self._update_count = ts.get("update_count", 0)
+                resume_epoch = ts.get("epoch", 0)
+                print(f"  [resume] optimizers loaded, epoch={resume_epoch}")
+
+            buf_path = os.path.join(path, "buffer.npz")
+            if os.path.isfile(buf_path):
+                bd = np.load(buf_path)
+                n = int(bd["size"])
+                self.buffer.obs_buffer[:n] = bd["obs"]
+                self.buffer.next_obs_buffer[:n] = bd["next_obs"]
+                self.buffer.act_buffer[:n] = bd["act"]
+                self.buffer.rew_buffer[:n] = bd["rew"]
+                self.buffer.terminated_buffer[:n] = bd["terminated"]
+                self.buffer.truncated_buffer[:n] = bd["truncated"]
+                self.buffer.ptr = int(bd["ptr"])
+                self.buffer.size = n
+                print(f"  [resume] buffer loaded ({n:,} transitions)")
+
         print(f"  [loaded] {path}")
+        return resume_epoch
 
 
 # ======================================================================
@@ -845,30 +904,33 @@ class AdversarialTD3Agent:
         return self.det_trainer.train_step(obs, dist, alpha, magnitude)
 
     # ------------------------------------------------------------------
-    def train(self, epochs: Optional[int] = None) -> None:
+    def train(self, epochs: Optional[int] = None,
+              resume_epoch: int = 0) -> None:
         epochs = epochs or self.epochs
         N = self.num_envs
 
-        # Overwrite CSVs on each new training run
-        with open(self._csv_path, "w", newline="") as f:
-            csv.writer(f).writerow(
-                ["step", "episode_return", "has_disturbance"])
-
         metrics_csv = os.path.join(self.log_dir, "training_metrics.csv")
-        metrics_header = [
-            "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
-            "q1_val", "q2_val",
-            "grad_q1", "grad_q2", "grad_pi_rob", "grad_pi_adv",
-            "mean_return", "mean_length", "episodes",
-            "dist_episodes", "buffer_size", "elapsed_s",
-        ]
-        if self.use_transformer:
-            metrics_header += ["det_loss", "det_dist_loss", "det_alpha_loss"]
-        with open(metrics_csv, "w", newline="") as f:
-            csv.writer(f).writerow(metrics_header)
+        if resume_epoch > 0:
+            print(f"  [resume] Continuing from epoch {resume_epoch}/{epochs}")
+        else:
+            with open(self._csv_path, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    ["step", "episode_return", "has_disturbance"])
+            metrics_header = [
+                "epoch", "step", "loss_q1", "loss_q2", "loss_pi",
+                "q1_val", "q2_val",
+                "grad_q1", "grad_q2", "grad_pi_rob", "grad_pi_adv",
+                "mean_return", "mean_length", "episodes",
+                "dist_episodes", "buffer_size", "elapsed_s",
+            ]
+            if self.use_transformer:
+                metrics_header += ["det_loss", "det_dist_loss", "det_alpha_loss"]
+            with open(metrics_csv, "w", newline="") as f:
+                csv.writer(f).writerow(metrics_header)
 
         total_transitions = self.steps_per_epoch * epochs
         total_steps = total_transitions // N
+        start_step = (self.steps_per_epoch * resume_epoch) // N
         # Epsilon annealing: ramp disturbance budget from 0 -> disturbance_ratio
         # over the first warmup_fraction of total transitions (paper: first 20%)
         warmup_steps = int(self.warmup_fraction * total_transitions)
@@ -900,7 +962,7 @@ class AdversarialTD3Agent:
 
         self.perf.start_epoch()
 
-        for t in range(total_steps):
+        for t in range(start_step, total_steps):
             global_step = t * N
 
             # Adversarial curriculum: linearly anneal disturbance budget
@@ -1108,10 +1170,11 @@ class AdversarialTD3Agent:
                     self.perf.start_epoch()
 
                     if epoch % self.save_freq == 0:
-                        self.save()
+                        self.save(epoch=epoch, global_step=global_step)
 
     # ------------------------------------------------------------------
-    def save(self, path: Optional[str] = None) -> None:
+    def save(self, path: Optional[str] = None, *, epoch: int = 0,
+             global_step: int = 0, save_buffer: bool = True) -> None:
         path = path or os.path.join(self.log_dir, "checkpoints")
         os.makedirs(path, exist_ok=True)
         torch.save(self.pi_rob.state_dict(), os.path.join(path, "pi_rob.pt"))
@@ -1121,9 +1184,38 @@ class AdversarialTD3Agent:
         if self.use_transformer:
             torch.save(self.detector.state_dict(),
                        os.path.join(path, "detector.pt"))
-        print(f"  [saved] {path}")
+        # Training state for resume
+        ts = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "update_count": self._update_count,
+            "pi_rob_optim": self.pi_rob_optim.state_dict(),
+            "pi_adv_optim": self.pi_adv_optim.state_dict(),
+            "q1_optim": self.q1_optim.state_dict(),
+            "q2_optim": self.q2_optim.state_dict(),
+        }
+        if self.use_transformer:
+            ts["det_optim"] = self.det_trainer.optimizer.state_dict()
+        torch.save(ts, os.path.join(path, "training_state.pt"))
+        if save_buffer and self.buffer.size > 0:
+            n = self.buffer.size
+            np.savez_compressed(
+                os.path.join(path, "buffer.npz"),
+                obs=self.buffer.obs_buffer[:n],
+                next_obs=self.buffer.next_obs_buffer[:n],
+                act=self.buffer.act_buffer[:n],
+                rew=self.buffer.rew_buffer[:n],
+                terminated=self.buffer.terminated_buffer[:n],
+                truncated=self.buffer.truncated_buffer[:n],
+                ptr=self.buffer.ptr, size=self.buffer.size,
+            )
+        print(f"  [saved] {path}  (epoch={epoch})")
 
-    def load(self, path: str) -> None:
+    def load(self, path: str, *, resume: bool = False) -> int:
+        """Load checkpoint. If resume=True, also load optimizers and buffer.
+
+        Returns the epoch to resume from (0 if not resuming).
+        """
         self.pi_rob.load_state_dict(torch.load(os.path.join(
             path, "pi_rob.pt"), map_location=self.device))
         self.pi_adv.load_state_dict(torch.load(os.path.join(
@@ -1141,4 +1233,35 @@ class AdversarialTD3Agent:
             if os.path.isfile(det_path):
                 self.detector.load_state_dict(
                     torch.load(det_path, map_location=self.device))
+
+        resume_epoch = 0
+        if resume:
+            ts_path = os.path.join(path, "training_state.pt")
+            if os.path.isfile(ts_path):
+                ts = torch.load(ts_path, map_location=self.device)
+                self.pi_rob_optim.load_state_dict(ts["pi_rob_optim"])
+                self.pi_adv_optim.load_state_dict(ts["pi_adv_optim"])
+                self.q1_optim.load_state_dict(ts["q1_optim"])
+                self.q2_optim.load_state_dict(ts["q2_optim"])
+                self._update_count = ts.get("update_count", 0)
+                resume_epoch = ts.get("epoch", 0)
+                if self.use_transformer and "det_optim" in ts:
+                    self.det_trainer.optimizer.load_state_dict(ts["det_optim"])
+                print(f"  [resume] optimizers loaded, epoch={resume_epoch}")
+
+            buf_path = os.path.join(path, "buffer.npz")
+            if os.path.isfile(buf_path):
+                bd = np.load(buf_path)
+                n = int(bd["size"])
+                self.buffer.obs_buffer[:n] = bd["obs"]
+                self.buffer.next_obs_buffer[:n] = bd["next_obs"]
+                self.buffer.act_buffer[:n] = bd["act"]
+                self.buffer.rew_buffer[:n] = bd["rew"]
+                self.buffer.terminated_buffer[:n] = bd["terminated"]
+                self.buffer.truncated_buffer[:n] = bd["truncated"]
+                self.buffer.ptr = int(bd["ptr"])
+                self.buffer.size = n
+                print(f"  [resume] buffer loaded ({n:,} transitions)")
+
         print(f"  [loaded] {path}")
+        return resume_epoch
