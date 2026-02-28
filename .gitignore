@@ -31,10 +31,7 @@ htmlcov/
 .coverage
 
 # Training outputs – keep logs/ out of git
-logs/
 *.npz
-*.pt
-*.pth
 
 # But keep pretrained examples
 !pretrained/
